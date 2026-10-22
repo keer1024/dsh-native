@@ -1,0 +1,8 @@
+# build artifacts
+dist/
+target/
+*.old
+# local junk
+.tmp/
+node_modules/
+*.log

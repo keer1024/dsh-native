@@ -1,0 +1,49 @@
+{
+  "name": "dsh-native",
+  "version": "1.4.1",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "description": "dsh-native: resident Rust worker (lane pool, session affinity, soft RSS/CPU limits) for command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; host-side JSON-RPC middleware with 7 HTTP routes, plus a pinned projection view, a Grafana-style monitor and the R-Native status strip.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-native",
+    "rust",
+    "sidecar",
+    "powershell",
+    "code-index",
+    "session-projection"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "bin/dsh-rust-worker.exe",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "pack:check": "npm pack --dry-run"
+  }
+}

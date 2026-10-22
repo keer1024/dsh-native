@@ -1,0 +1,25 @@
+[package]
+name = "dsh-rust-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Persistent Rust business-execution worker for DSH (framed JSON-RPC over stdio)"
+license = "MIT"
+
+[[bin]]
+name = "dsh-rust-worker"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+regex = "1"
+memchr = "2"
+ruzstd = "0.9.1"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
