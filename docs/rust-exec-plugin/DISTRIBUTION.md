@@ -1,4 +1,4 @@
-# dsh-native 分发与跨机安装（1.4.1 · 2026-10-22）
+# dsh-native 分发与跨机安装（1.4.2 · 2026-10-22）
 
 > 本文给出把 `packages/dsh-rust-exec` 变成**自带 worker 二进制、可脱离本仓库安装**的 bundle 的当前做法，
 > 以及在一台干净机器上安装、验收、排错的步骤。发布到 npm / 插件市场见
@@ -8,9 +8,9 @@
 
 | 项 | 值 |
 | --- | --- |
-| 包版本 | `dsh-native@1.4.1`（worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号未统一） |
-| tarball | `dist/dsh-native-1.4.1.tgz` · **1 033 399** 字节 · 解压 2.4 MB · 9 个文件 |
-| tarball sha256 | `cd257a93e027a678f9f04dd083a7ecb11619265a87962bf1ecece2205a9db4b6` |
+| 包版本 | `dsh-native@1.4.2`（worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号未统一） |
+| tarball | `dist/dsh-native-1.4.2.tgz` · **1 037 336** 字节 · 解压 2.4 MB · 11 个文件 |
+| tarball sha256 | `ce990f9d0ac456b7d9fcf4995d8b1f8e4c8d14fba6036d191fd0083616c8cdc1` |
 | 包内 exe | `bin/dsh-rust-worker.exe` · 2 255 872 B · sha256 `AD343EF0B730985CF4B8FA5B67637AA11B56E17928ACC0160E0A6E0CFDC42B04` |
 | 包内文件 | `package.json`、`index.js`、`client.js`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`bin/dsh-rust-worker.exe`、`CHANGELOG.md` |
 | 实测 | `pnpm install`（pnpm 10.32.1）从 tarball 装进空目录 → `node_modules/dsh-native` 9 个条目齐全 → `import('dsh-native')` 导出 `Config,RustWorker,WorkerPool,apply,inject` → `check_client_identity` 17/17 |
@@ -24,8 +24,8 @@ node --check packages\dsh-rust-exec\index.js
 node --check packages\dsh-rust-exec\client.js
 node tools\check_client_identity.mjs
 npm pack packages\dsh-rust-exec --pack-destination dist
-tar -tzf dist\dsh-native-1.4.1.tgz          # 必须正好 9 个文件
-(Get-FileHash dist\dsh-native-1.4.1.tgz -Algorithm SHA256).Hash
+tar -tzf dist\dsh-native-1.4.2.tgz          # 必须正好 11 个文件
+(Get-FileHash dist\dsh-native-1.4.2.tgz -Algorithm SHA256).Hash
 ```
 
 `npm pack` 只收 `package.json` 的 `files[]` 白名单里的东西，`bin/*.old`、`src/`、测试脚本都不会进包。
@@ -36,12 +36,12 @@ tar -tzf dist\dsh-native-1.4.1.tgz          # 必须正好 9 个文件
 
 ### 路线 A：tarball 离线安装（推荐，已实测）
 
-1. 把 `dsh-native-1.4.1.tgz` 拷到目标机，例如 `C:\dsh\dist\dsh-native-1.4.1.tgz`。
+1. 把 `dsh-native-1.4.2.tgz` 拷到目标机，例如 `C:\dsh\dist\dsh-native-1.4.2.tgz`。
 2. 编辑 `%USERPROFILE%\.dsh\profiles\desktop\package.json`：
    ```json
    {
      "dependencies": {
-       "dsh-native": "file:C:/dsh/dist/dsh-native-1.4.1.tgz"
+       "dsh-native": "file:C:/dsh/dist/dsh-native-1.4.2.tgz"
      },
      "dsh": {
        "profile": {
@@ -112,7 +112,7 @@ tar -tzf dist\dsh-native-1.4.1.tgz          # 必须正好 9 个文件
 > | --- | --- |
 > | 包版本 | `dsh-rust-exec@1.1.0`（worker `Cargo.toml` 仍是 `0.1.0`，两套版本号未统一） |
 > | 打包命令 | `npm pack C:\...\packages\dsh-rust-exec`（Windows 上 `tar -tzf` 可列包内文件） |
-> | `files` 校验 | 包内 9 个文件：`index.js`、`client.js`、`package.json`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`bin/dsh-rust-worker.exe`、`CHANGELOG.md`；无 `src/`、无 `package-lock` |
+> | `files` 校验 | 包内 11 个文件：`index.js`、`client.js`、`package.json`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`bin/dsh-rust-worker.exe`、`CHANGELOG.md`；无 `src/`、无 `package-lock` |
 > | tarball | `dsh-rust-exec-1.1.0.tgz`，**1 019 760** 字节 |
 > | tarball sha256 | `CC2F923C9B3F1E6E4D9DCF7974F8E9A9DC68209F369614D3AC94AB990E6F83C6` |
 > | 包内 exe sha256 | `4C8867DD50397D04B1876B10A67B56D3F54074F2D56E89EA58CD30FDB30AD4FE`（2 254 336 B） |

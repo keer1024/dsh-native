@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.1-2f6fed?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.2-2f6fed?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
@@ -28,7 +28,7 @@
 
 对外是 **10 个工具 + 7 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.4.1**（2026-10-22）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+> 当前版本 **1.4.2**（2026-10-22）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
 
 ---
 
@@ -58,7 +58,7 @@
 <p align="center">
   <img src="image/worker.png" alt="dsh-native 视图页：固定头部的会话投影视图" width="880">
   <br>
-  <sub><b>② 视图页</b> — 固定头部（计数、模糊筛选、类别 chips、监控器/刷新）+ 左侧消息列表 + 固定 420 px 详情</sub>
+  <sub><b>② 视图页</b> — 固定头部（计数、模糊筛选、类别下拉、监控器/刷新）+ 左侧消息列表 + 固定 420 px 详情</sub>
 </p>
 
 <p align="center">
@@ -91,7 +91,7 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 ### 3.2 从 tarball 安装（离线 / 内网）
 
 ```powershell
-npm i E:\path\dsh-native-1.4.1.tgz
+npm i E:\path\dsh-native-1.4.2.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -246,14 +246,16 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 
 ### 9.2 会话投影视图（`conversation.view`）
 
-- **顶部栏固定**：消息数 / 工具调用数、mode 与耗时、模糊搜索、类别 chips、工具名下拉、刷新、监控器。
+- **顶部栏固定**：消息数 / 工具调用数、mode 与耗时、模糊搜索、类别下拉、工具名下拉、刷新、监控器。
 - **只有两个区域滚动**：左侧消息列表、右侧详情；外层不产生滚动条。视图会测量 DSH 共享
   scrollport（`[data-conversation-scroll]`）的可见高度，减去内边距、自身布局偏移（与
   `scrollTop` 无关）和悬浮输入区（`[data-composer-seat]`，回退 `--dsh-composer-height`），
   把根节点钉成像素高度——这是 DSH 强制 `flex:1 0 auto; min-height:auto` 之后唯一可靠的做法。
 - **模糊筛选**：大小写不敏感的子序列匹配，作用于 `preview / name / kind / seq`，命中片段
   `<mark>` 高亮，显示 `filtered / total`；空结果给空态提示。
-- **类别筛选**：`全部` + 出现过的 kind（用户/助手/工具/系统），工具名二级下拉最多 20 项。
+- **类别筛选**：单个下拉（`全部类别` + 数据里出现过的 kind）。已知四类固定顺序
+  系统 → 用户 → 助手 → 工具，未来 DSH 新增的 kind 自动进下拉并按字母序排后面——不需要改代码，
+  也不会像按钮组那样把固定头部撑高。工具名二级下拉最多 20 项。
 - **详情**：固定 **420 px**、不可拖拽；加载完成后自动选中第一条（过滤后）消息；内容超出时
   在详情内部滚动；容器窄于 720 px 时降级为上下堆叠。
 - 列表是 windowed 渲染（46 px 行高 + overscan），400 行也不卡。
@@ -262,6 +264,10 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 
 标签 **`R-Native`**，后面依次 CPU → 内存 → 运行中 → 队列；`title` 为
 `R-Native · dsh-native 实时资源`。采样失败时保留上一次值，不闪 `NaN`。
+
+数值用等宽数字（`tabular-nums` / `"tnum"`）并各自占一个**固定 `ch` 宽度的右对齐槽位**
+（CPU `4ch`、RSS `7ch`、运行中 `2ch`、队列 `2ch`）。只开等宽数字不够：`0% → 100%`、`9 MB →
+1024 MB` 会改变字符串长度，居中的整行就会被推着左右跳；定宽槽位让数值变化时状态条纹丝不动。
 
 
 ## 10. 性能（本机实测）

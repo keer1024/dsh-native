@@ -68,6 +68,9 @@ const ctx = {
 const config = {
   workerPath: 'C:\\no-such-dir\\dsh-rust-worker.exe',
   defaultTimeoutMs: 2000,
+  // All ten tools up front: this test pins registration under a late webServer, and the
+  // resident set (5) under progressive disclosure is covered by the disclosure test.
+  progressiveDisclosure: false,
 }
 
 console.log('scenario: webServer appears 600 ms after apply()')

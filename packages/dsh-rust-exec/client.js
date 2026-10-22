@@ -617,6 +617,15 @@ window.__ModuleLoader__.load({
       return entry ? pick(entry[0], entry[1]) : String(kind || '?')
     }
 
+    // Stable option order for the kind dropdown: the four kinds DSH emits most often first, then
+    // any kind a future DSH version adds (alphabetical), so the order never drifts with load order.
+    const KIND_ORDER = ['system', 'user', 'assistant', 'tool']
+
+    function kindRank(kind) {
+      const at = KIND_ORDER.indexOf(String(kind || '').toLowerCase())
+      return at < 0 ? KIND_ORDER.length : at
+    }
+
     /** Case-insensitive subsequence match: "tst" finds "test". An empty query matches all. */
     function fuzzyMatch(needle, haystack) {
       if (!needle) return true
@@ -836,7 +845,8 @@ window.__ModuleLoader__.load({
       const timings = (meta && meta.timings) || {}
       const totalMs = typeof timings.totalMs === 'number' ? Math.round(timings.totalMs * 10) / 10 : null
       const sortedRows = rows
-      const kinds = useMemo(() => [...new Set(sortedRows.map((row) => String(row.kind || '')))].filter(Boolean), [sortedRows])
+      const kinds = useMemo(() => [...new Set(sortedRows.map((row) => String(row.kind || '')))].filter(Boolean)
+        .sort((a, b) => kindRank(a) - kindRank(b) || a.localeCompare(b)), [sortedRows])
       const toolNames = useMemo(() => [...new Set(sortedRows
         .filter((row) => String(row.kind || '').toLowerCase().includes('tool'))
         .map((row) => row.name)
@@ -903,26 +913,24 @@ window.__ModuleLoader__.load({
               'data-dsh-rust-search': '1',
               placeholder: pick('模糊匹配：预览 / 工具名 / 类别 / 序号', 'Fuzzy filter: preview, tool, kind, seq'),
               onChange: (event) => setQuery(event.target.value),
-              style: { flex: '1 1 240px', minWidth: 160, background: 'transparent', color: 'inherit', fontSize: 12, padding: '4px 8px', border: '1px solid color-mix(in srgb, currentColor 22%, transparent)', borderRadius: 6 },
+              style: { flex: '1 1 240px', minWidth: 140, background: 'transparent', color: 'inherit', fontSize: 12, padding: '4px 8px', border: '1px solid color-mix(in srgb, currentColor 22%, transparent)', borderRadius: 6 },
             }),
-            h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
-              ['all', ...kinds].map((kind) => h('button', {
-                key: kind,
-                type: 'button',
-                'data-dsh-rust-kind': kind,
-                onClick: () => setKindFilter(kind),
-                style: {
-                  ...VIEW_BUTTON_STYLE,
-                  fontSize: 11.5, padding: '3px 9px',
-                  background: kindFilter === kind ? 'color-mix(in srgb, currentColor 14%, transparent)' : 'transparent',
-                },
-              }, kind === 'all' ? pick('全部', 'all') : kindLabel(kind))),
+            h('select', {
+              value: kindFilter,
+              'data-dsh-rust-kind': '1',
+              'aria-label': pick('类别筛选', 'filter by kind'),
+              title: pick('按类别筛选', 'filter by kind'),
+              onChange: (event) => setKindFilter(event.target.value),
+              style: { fontSize: 11.5, padding: '3px 6px', borderRadius: 6, maxWidth: 150, flex: '0 0 auto' },
+            },
+              h('option', { value: 'all' }, pick('全部类别', 'all kinds')),
+              kinds.map((kind) => h('option', { key: kind, value: kind }, kindLabel(kind))),
             ),
             toolNames.length ? h('select', {
               value: toolFilter,
               'data-dsh-rust-tool': '1',
               onChange: (event) => setToolFilter(event.target.value),
-              style: { fontSize: 11.5, padding: '3px 6px', borderRadius: 6 },
+              style: { fontSize: 11.5, padding: '3px 6px', borderRadius: 6, maxWidth: 170, flex: '0 0 auto' },
             },
               h('option', { value: '' }, pick('全部工具', 'all tools')),
               toolNames.map((name) => h('option', { key: name, value: name }, name)),
@@ -1220,11 +1228,18 @@ window.__ModuleLoader__.load({
       const last = data?.history?.fast?.slice(-1)[0]
       if (!data || !last) return error ? null : null
       const rss = Math.round((last.workingSetBytes || 0) / (1024 * 1024))
-      const parts = [
-        'CPU ' + Math.round(last.cpuPctOneCore || 0) + '%',
-        'RSS ' + rss + ' MB',
-        pick('运行中 ', 'running ') + (last.inflight || 0),
-        pick('队列 ', 'queue ') + (last.queued || 0),
+      // Label and value are separate nodes with a fixed-width, right-aligned value: tabular digits
+      // alone still change the string length ("0%" -> "100%"), which made the centred strip jump.
+      const itemStyle = { display: 'inline-flex', alignItems: 'baseline', gap: 4 }
+      const valueStyle = (width) => ({
+        display: 'inline-block', textAlign: 'right', minWidth: width,
+        fontVariantNumeric: 'tabular-nums', fontFeatureSettings: '"tnum"',
+      })
+      const items = [
+        ['CPU', Math.round(last.cpuPctOneCore || 0) + '%', '4ch'],
+        ['RSS', rss + ' MB', '7ch'],
+        [pick('运行中', 'running'), String(last.inflight || 0), '2ch'],
+        [pick('队列', 'queue'), String(last.queued || 0), '2ch'],
       ]
       return h('div', {
         title: pick('R-Native · dsh-native 实时资源', 'R-Native · dsh-native live resources'),
@@ -1236,7 +1251,10 @@ window.__ModuleLoader__.load({
       },
         h('span', { style: { width: 6, height: 6, borderRadius: 99, background: (last.cpuPctOneCore || 0) > 50 ? COLORS.warn : COLORS.ok, display: 'inline-block' } }),
         h('span', null, 'R-Native'),
-        ...parts.map((part, index) => h('span', { key: index }, part)),
+        ...items.map(([label, value, width], index) => h('span', { key: label, style: itemStyle },
+          h('span', null, label),
+          h('span', { 'data-dsh-rust-metric': index, style: valueStyle(width) }, value),
+        )),
       )
     }
 

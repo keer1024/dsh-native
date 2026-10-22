@@ -1,7 +1,6 @@
 {
   "name": "dsh-native",
-  "version": "1.4.1",
-  "private": true,
+  "version": "1.4.2",
   "type": "module",
   "main": "./index.js",
   "description": "dsh-native: resident Rust worker (lane pool, session affinity, soft RSS/CPU limits) for command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; host-side JSON-RPC middleware with 7 HTTP routes, plus a pinned projection view, a Grafana-style monitor and the R-Native status strip.",
@@ -45,5 +44,27 @@
   "scripts": {
     "check": "node --check index.js && node --check client.js",
     "pack:check": "npm pack --dry-run"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keer1024/dsh-native.git"
+  },
+  "homepage": "https://github.com/keer1024/dsh-native#readme",
+  "bugs": {
+    "url": "https://github.com/keer1024/dsh-native/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   }
 }

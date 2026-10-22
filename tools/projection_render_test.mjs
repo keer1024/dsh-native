@@ -255,6 +255,25 @@ check('empty filter state is explicit', /没有匹配的消息|No message matche
 await typeInto(search, '')
 check('clearing the filter restores every row', viewHost.querySelectorAll('[data-dsh-rust-row]').length === 2, String(viewHost.querySelectorAll('[data-dsh-rust-row]').length))
 
+// ---- kind filter is one dropdown, not a chip row (user request m02273) --------
+const kindSelects = viewHost.querySelectorAll('[data-dsh-rust-kind]')
+check('kind filter is a single select', kindSelects.length === 1 && kindSelects[0].tagName === 'SELECT', String(kindSelects.length))
+check('kind chips are gone', viewHost.querySelectorAll('button[data-dsh-rust-kind]').length === 0)
+const kindOptions = [...viewHost.querySelectorAll('[data-dsh-rust-kind] option')].map((option) => option.value)
+check('kind options are all + every kind', kindOptions.join(',') === 'all,system,user', kindOptions.join(','))
+const pickKind = async (value) => {
+  await act(async () => {
+    const node = viewHost.querySelector('[data-dsh-rust-kind]')
+    const key = Object.keys(node).find((name) => name.startsWith('__reactProps'))
+    if (key && node[key]?.onChange) node[key].onChange({ target: { value } })
+  })
+  await settle(200)
+}
+await pickKind('system')
+check('kind dropdown filters the list', viewHost.querySelectorAll('[data-dsh-rust-row]').length === 1 && /1 \/ 2/.test(viewText()), viewText().slice(0, 140))
+await pickKind('all')
+check('kind dropdown restores every row', viewHost.querySelectorAll('[data-dsh-rust-row]').length === 2, String(viewHost.querySelectorAll('[data-dsh-rust-row]').length))
+
 const viewMore = viewButtons().find((b) => /Load more|加载更多/.test(b.textContent))
 check('view load-more button present', Boolean(viewMore))
 await click(viewMore)

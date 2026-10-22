@@ -2,6 +2,24 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.4.2 — 2026-10-22
+
+### Changed — kind filter is a dropdown, metric slots no longer jump
+- The kind chips (`all / system / user / assistant / tool`) are now **one `<select>`**. Every kind
+  found in the projection lands in it automatically, so a future kind needs no code change; known
+  kinds keep a fixed order (system → user → assistant → tool) and unknown ones sort alphabetically
+  after them. The old chip row grew with each kind and pushed the header — which is height-pinned
+  against the DSH scrollport — taller.
+- The composer strip (`R-Native CPU … RSS … …`) splits each label from its value and gives the value
+  a fixed `ch`-wide, right-aligned slot (`4ch / 7ch / 2ch / 2ch`, `tabular-nums` + `"tnum"`).
+  Tabular digits alone were not enough: `0% → 100%` and `9 MB → 1024 MB` change the string length,
+  so the centred strip shifted left and right on every poll.
+- Tests: `projection_render_test` now pins "one select, no chip buttons, option order, filter →
+  `1 / 2`, reset → 2 rows"; `monitor_render_test` pins the four fixed slots and re-renders with an
+  extreme sample to prove the slot widths do not depend on the values.
+- `route_retry_test` sets `progressiveDisclosure: false` so its "tools register even without a
+  webServer" assertion counts all ten tools instead of the five resident ones.
+
 ## 1.4.1 — 2026-10-22
 
 ### Changed — `meta.description` is the pitch, README is the manual
