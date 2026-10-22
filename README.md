@@ -1,4 +1,4 @@
-# dsh-native — DSH 的常驻 Rust 侧车（原名 dsh-flash）
+# dsh-native — DSH 的常驻 Rust 驱动（原名 dsh-flash）
 
 把 DSH 里「真正动手」的那部分交给一个**常驻的 Rust worker**：命令执行、带 sha256 校验的文件读写、
 代码索引与检索、会话日志投影、资源采样都在 Rust 侧完成。DSH 宿主只做中间件（JSON-RPC 管道、
