@@ -1,20 +1,40 @@
-# dsh-native — DSH 的常驻 Rust 驱动（原名 dsh-flash）
+<p align="center">
+  <img src="packages/dsh-rust-exec/icon.svg" width="112" height="112" alt="dsh-native">
+</p>
 
-把 DSH 里「真正动手」的那部分交给一个**常驻的 Rust worker**：命令执行、带 sha256 校验的文件读写、
-代码索引与检索、会话日志投影、资源采样都在 Rust 侧完成。DSH 宿主只做中间件（JSON-RPC 管道、
-lane 调度、工具/路由注册、只读投影缓存），浏览器侧只做**叠加式**展示，不接管对话渲染。
+<h1 align="center"><img src="image/wordmark.svg" width="300" height="76" alt="dsh-native"></h1>
 
-对外是 **10 个工具、7 条 HTTP 路由**：一个固定头部的会话投影视图（模糊筛选 + 固定 420 px 详情）、
-一个 Grafana 风格监控器（数字卡片、生命周期 min/max、零依赖 sparkline）、输入框下沿的
-`R-Native` 资源状态条。
+<p align="center"><code>a resident Rust sidecar for DeepSeek Harness</code></p>
 
-> 当前版本 **1.4.1**（2026-10-22）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；工具名
-> `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，
-> 以免破坏现有脚本与日志。完整变更见 [CHANGELOG](packages/dsh-rust-exec/CHANGELOG.md)。
+<p align="center"><sub>warm shell lanes · sha256-guarded file IO · code index &amp; search · session-log projection · resource monitor</sub></p>
+
+<p align="center">
+  <a href="#中文">中文</a> | <a href="#english">English</a>
+</p>
+
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.1-2f6fed?style=flat-square">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
+  <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
+  <img alt="worker" src="https://img.shields.io/badge/worker-Rust%20%2B%20PowerShell%205.1-f0a04b?style=flat-square">
+</p>
+
+<hr>
+
+<a id="中文"></a>
+
+把 DSH 里「真正动手」的那部分交给一个**常驻的 Rust worker**：命令执行、带 sha256 校验的文件读写、代码索引与检索、会话日志投影、资源采样都在 Rust 侧完成；DSH 宿主只做 JSON-RPC 管道、lane 调度与路由注册，浏览器侧只做**叠加式**展示。
+
+对外是 **10 个工具 + 7 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
+
+> 当前版本 **1.4.1**（2026-10-22）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
 
 ---
 
-## 1. 解决什么问题
+## 1. 为什么需要它
+
+
 
 1. **每次工具调用都新起进程太贵。** DSH 每调一次 `pwsh` 要付一次 PowerShell 冷启动
    （本机 2.4–4.4 s，低完整性沙箱下更慢）。这里改成常驻 worker + 常驻 shell server，
@@ -24,7 +44,79 @@ lane 调度、工具/路由注册、只读投影缓存），浏览器侧只做**
 3. **看不见运行状态。** worker 多少次重启、队列堵没堵、RSS 涨到哪、哪个会话在跑——
    全部进 `/metrics`、`rust_health` 和监控器，不用猜。
 
-## 2. 设计原则
+
+<a id="shots"></a>
+
+## 2. 界面速览
+
+<p align="center">
+  <img src="image/desc.png" alt="dsh-native 介绍：插件定位与设置入口" width="880">
+  <br>
+  <sub><b>① 介绍</b> — 设置页里的插件条目、版本与资源监控入口</sub>
+</p>
+
+<p align="center">
+  <img src="image/worker.png" alt="dsh-native 视图页：固定头部的会话投影视图" width="880">
+  <br>
+  <sub><b>② 视图页</b> — 固定头部（计数、模糊筛选、类别 chips、监控器/刷新）+ 左侧消息列表 + 固定 420 px 详情</sub>
+</p>
+
+<p align="center">
+  <img src="image/monitor.png" alt="dsh-native 监控页：Grafana 风格监控器" width="880">
+  <br>
+  <sub><b>③ 监控页</b> — 生命周期 min/max 数字卡片、零依赖 sparkline、worker 表与活动会话表</sub>
+</p>
+
+---
+
+## 3. 快速开始
+
+### 3.1 装到 DSH（npm）
+
+```powershell
+# 1) 装进 DSH profile
+pnpm add dsh-native          # 或 npm i dsh-native
+
+# 2) 挂载 bundle —— 编辑 <DSH_HOME>\profiles\<profile>\package.json
+#    "dsh": { "profile": { "bundles": [
+#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-native" ] } }
+
+# 3) 重启 DSH，然后验收
+curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
+```
+
+返回里能看到 `ok: true`、worker pid 和 `routes: 7`，就说明装好了；随后设置页 → 插件 → `dsh-native`
+会出现「监控器」按钮，对话页顶部会多出「R-Native 视图」页签。
+
+### 3.2 从 tarball 安装（离线 / 内网）
+
+```powershell
+npm i E:\path\dsh-native-1.4.1.tgz
+```
+
+目标机要求、profile 两处改动、SmartScreen 与常见失败见
+[分发与跨机安装](docs/rust-exec-plugin/DISTRIBUTION.md)。
+
+### 3.3 开发机自检
+
+```powershell
+node tools\check_client_identity.mjs      # 包名 / client 注册 id / patch 名 / files[] 一致性
+$env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路由与工具清单
+```
+
+### 3.4 升级与卸载
+
+- **升级**：`pnpm add dsh-native@latest` → 重启 DSH。exe 被占用时先 `Move-Item` 改名为 `.old`
+  （Windows 允许重命名运行中的镜像），复制新 exe，再删 `.old`。
+- **卸载**：在 DSH 插件管理里移除，或从 `dsh.profile.bundles` 删掉该条目 → 重启 DSH；
+  投影缓存可以整体删除，不残留状态。
+
+装好后 host 侧（工具、路由）热生效；客户端叠加物需要**刷新一次页面**。
+
+---
+
+## 4. 设计原则
+
 
 - **常驻而非按需**：worker 在 `apply()` 时就预热（`pool.start()`），冷启动成本落在 DSH 启动期，
   不落在第一次工具调用上。
@@ -36,7 +128,9 @@ lane 调度、工具/路由注册、只读投影缓存），浏览器侧只做**
 - **失败要可诊断**：握手/心跳/重启计数/最后一次退出码/路由挂载结果都在 `rust_health` 与
   `/health` 里，而不是只在控制台打一行日志。
 
-## 3. 架构
+
+## 5. 架构
+
 
 ```
 模型 ──工具调用──▶ dsh-native（host 插件, index.js）
@@ -65,7 +159,9 @@ lane 调度、工具/路由注册、只读投影缓存），浏览器侧只做**
 读回 Content-Length 帧 → 渲染器裁剪 → 模型`。同 session 的调用优先落在同一 worker，
 同 step 的多个调用可以真并行（lane 数决定上限）。
 
-## 4. 工具参考（10 个）
+
+## 6. 工具参考（10 个）
+
 
 | 工具 | 作用 | 主要参数 |
 |---|---|---|
@@ -83,7 +179,9 @@ lane 调度、工具/路由注册、只读投影缓存），浏览器侧只做**
 统一截断契约：被裁剪的结果在 footer 带 `truncated by lines|bytes · omitted N · complete=false`，
 完整结果显示 `complete`，便于模型判断要不要续读。
 
-## 5. HTTP 路由（7 条）
+
+## 7. HTTP 路由（7 条）
+
 
 前缀 `/api/dsh-rust-exec`，挂载失败会退避重试（不会「一次失败永久放弃」），挂载结果见
 `/health` 的 `routes.registered`。
@@ -101,7 +199,9 @@ lane 调度、工具/路由注册、只读投影缓存），浏览器侧只做**
 浏览器带会话凭据，Node 侧直接 `fetch` 会拿到 401——渲染测试里用「字段形状取自真实响应」的
 fixture 兜底。
 
-## 6. 配置
+
+## 8. 配置
+
 
 Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直接拒绝挂载；
 `POST /config` 可热改一部分（见上）。
@@ -127,9 +227,11 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 锁文件：`<DSH_HOME>/run/dsh-rust-worker-<profile>.lock`，内容两行 `pid` + 宿主实例 UUID。
 **由宿主写**（低完整性 worker 写不了），回收前会核对进程镜像名，绝不按 pid 盲杀。
 
-## 7. 界面
 
-### 7.1 设置页 → 插件 → `dsh-native`
+## 9. 界面细节
+
+
+### 9.1 设置页 → 插件 → `dsh-native`
 
 顶部只有两个按钮：**刷新**（重新拉一次 `/metrics`）与 **监控器**。
 
@@ -142,7 +244,7 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
   （sessionId、inflight、calls、lastCallMs、最近活动）。
 - `extremes` 由宿主在内存里累计：**DSH 重启清零，刷新页面不丢**。
 
-### 7.2 会话投影视图（`conversation.view`）
+### 9.2 会话投影视图（`conversation.view`）
 
 - **顶部栏固定**：消息数 / 工具调用数、mode 与耗时、模糊搜索、类别 chips、工具名下拉、刷新、监控器。
 - **只有两个区域滚动**：左侧消息列表、右侧详情；外层不产生滚动条。视图会测量 DSH 共享
@@ -156,12 +258,14 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
   在详情内部滚动；容器窄于 720 px 时降级为上下堆叠。
 - 列表是 windowed 渲染（46 px 行高 + overscan），400 行也不卡。
 
-### 7.3 状态条（`conversation.composer.dock`）
+### 9.3 状态条（`conversation.composer.dock`）
 
 标签 **`R-Native`**，后面依次 CPU → 内存 → 运行中 → 队列；`title` 为
 `R-Native · dsh-native 实时资源`。采样失败时保留上一次值，不闪 `NaN`。
 
-## 8. 性能（本机实测）
+
+## 10. 性能（本机实测）
+
 
 | 场景 | 结果 | 口径 |
 |---|---|---|
@@ -175,23 +279,9 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 插件在 `apply()` 预热，所以这笔钱通常已经付在 DSH 启动期；若你看到「第一次 `rust_exec` 很慢、
 之后很快」，那不是回归。
 
-## 9. 安装 / 升级 / 卸载
 
-开发机（当前 profile 已是 `link:` 依赖）：
+## 11. 运维与排障
 
-```powershell
-node tools\check_client_identity.mjs      # 包名 / client 注册 id / patch 名 / files[] 一致性
-$env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路由与工具清单
-```
-
-跨机分发走 tarball 或 npm，步骤、目标机要求与排错表见
-[分发与跨机安装](docs/rust-exec-plugin/DISTRIBUTION.md)。升级 exe 时若文件被占用：
-先 `Move-Item` 改名为 `.old`（Windows 允许重命名运行中的镜像），复制新 exe，再删 `.old`。
-
-装好后：host 侧（工具、路由）热生效；客户端叠加物需要**刷新一次页面**。
-卸载走 DSH 插件管理（`plugin_manager` 或 profile 的 `dsh.profile.bundles`），再重启 DSH。
-
-## 10. 运维与排障
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
@@ -203,7 +293,9 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路�
 | 强杀 worker 后残留 `powershell.exe` | Windows 不杀进程树 | `kill()` 用 `taskkill /T`；新 worker 启动时再扫一遍死父进程的 shell |
 | 状态条/视图不更新 | 页面还是旧 client bundle | 刷新页面；仍不行则重启 DSH |
 
-## 11. 测试与验收
+
+## 12. 测试与验收
+
 
 所有脚本在仓库根目录跑（PowerShell 5.1 + Node ≥22）：
 
@@ -226,7 +318,9 @@ node tools\p2_bench.mjs                          # 同召回 token 降幅
 最近一次全量（2026-10-22）：identity 20/20、worker 15/15、lifecycle 10/10、pool 10/10、
 reap 7/7、sweep 3/3，渲染与路由脚本全绿。
 
-## 12. 兼容性与限制
+
+## 13. 兼容性与限制
+
 
 - **平台**：仅 Windows 10/11 x64（worker 用 `OpenProcess` 看护宿主、`powershell.exe` 作 shell、
   文件路径按 Windows 语义）。macOS/Linux 需要另出二进制。
@@ -237,7 +331,9 @@ reap 7/7、sweep 3/3，渲染与路由脚本全绿。
 - **未发布**：`package.json` 目前 `private: true`，通过 tarball / 目录 link 分发；npm 裸名
   `dsh-native` 可用（2026-10-22 复核）。
 
-## 13. 目录结构
+
+## 14. 目录结构
+
 
 ```
 packages/dsh-rust-exec/      host 插件 + 客户端叠加物 + 预编译 worker
@@ -252,20 +348,28 @@ docs/rust-exec-plugin/       设计、实测、发布、分发文档
 dist/                        打包产物（tarball + sha256）
 ```
 
-## 14. 文档
 
-| 文档 | 内容 |
-|---|---|
-| [实测结果与交付说明](docs/rust-exec-plugin/RESULTS.md) | 快了多少、哪些假设被推翻、各阶段验收数字与限制 |
-| [性能分析 · 架构 · 计划](docs/rust-exec-plugin/ANALYSIS_AND_PLAN.md) | 基线、Amdahl 收益模型、架构、阶段状态 |
-| [并发与资源治理](docs/rust-exec-plugin/CONCURRENCY_AND_METRICS.md) | lane 租约模型、隔离铁律、闸门参数 |
-| [伴生生命周期](docs/rust-exec-plugin/COMPANION_LIFECYCLE.md) | 握手、双向心跳、宿主 pid 看护、退出码、陈旧实例回收 |
-| [会话打开分析](docs/rust-exec-plugin/SESSION_OPEN.md) | 四段耗时实测、head 模式与分页设计 |
-| [插槽探测报告](docs/rust-exec-plugin/SLOT_PROBE.md) | 客户端插槽 ABI 与降级行为 |
-| [状态与坑](docs/rust-exec-plugin/RESUME.md) | 当前状态、剩余项、构建/部署/编码坑 |
-| [对标 dsh-ops](docs/rust-exec-plugin/DSH_OPS_COMPARISON.md) | 设计对比、吸收了什么、明确不抄什么、待办排序 |
-| [发布与维护](docs/rust-exec-plugin/PUBLISHING.md) | 打包清单、发布流程、市场提交、回滚 |
-| [分发与跨机安装](docs/rust-exec-plugin/DISTRIBUTION.md) | 打 tarball、三条安装路线、目标机要求、装后验收与排错 |
+## 15. 文档与许可
 
-维护者速记：改 `client.js` 后刷页面即可；改 `index.js` 需重启 DSH；改 Rust 需
-`cargo build --release` 并按「先改名再复制」的方式换 `bin/dsh-rust-worker.exe`。
+- 完整文档索引见下；历史设计/实验记录在 [docs/rust-exec-plugin](docs/rust-exec-plugin/)。
+- 分发与跨机安装：[DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)
+- 与 dsh-ops 的能力对比：[DSH_OPS_COMPARISON.md](docs/rust-exec-plugin/DSH_OPS_COMPARISON.md)
+- 发布到 npm / 插件市场：[PUBLISHING.md](docs/rust-exec-plugin/PUBLISHING.md)
+- 变更记录：[CHANGELOG.md](packages/dsh-rust-exec/CHANGELOG.md)
+- 许可证：[MIT](packages/dsh-rust-exec/LICENSE)
+
+<a id="english"></a>
+
+---
+
+## English
+
+**dsh-native** is a resident Rust sidecar for [DeepSeek Harness](https://github.com/deepseek-ai). Command execution, sha256-guarded file IO, code indexing/search, session-log projection and resource sampling all run in a long-lived Rust worker; the host stays a thin JSON-RPC / lane-scheduling / route layer.
+
+- **10 tools** — `rust_exec`, `rust_read`, `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_search`, `rust_symbols`, `rust_session_open`, `rust_health`
+- **7 routes** — `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config}`
+- **UI** — pinned-header projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor (lifecycle min/max + sparkline), `R-Native` resource strip
+- **Install** — `pnpm add dsh-native`, add `dsh-native` to `dsh.profile.bundles`, restart DSH
+- **Requires** — Windows 10/11 x64 · DSH desktop · PowerShell 5.1 (no Node.js on the target machine)
+
+See the Chinese sections above for the full manual, or read [CHANGELOG.md](packages/dsh-rust-exec/CHANGELOG.md).
