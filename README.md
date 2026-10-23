@@ -341,6 +341,11 @@ worker 镜像、完整性判定和日志路径。
 | `session.body` 一页正文 | 15–25 ms | 三帧 decode/parse/read |
 | worker 握手 | ~11 ms | hello + initialize |
 
+2026-10-23 19:00 的定时基准（同一模拟任务双栈对比、协议层 n=12、会话层每栈 3 轮）见
+[docs/rust-exec-plugin/NATIVE_BENCH_2026-10-23.md](docs/rust-exec-plugin/NATIVE_BENCH_2026-10-23.md)：
+执行类 107×、搜索 12.7×（中位数 3.1×）、小文件读写 0.3–1.4×，同一任务工具耗时 11.75 s → 0.52 s。
+结论是「买进程启动时间和输出预算，不买文件系统吞吐」。
+
 注意：**新建** PowerShell 进程在本机要 3–20 s（Defender + 模块首次加载，低完整性进程更慢）。
 1.6.1 起这笔钱落在「延迟启动」的后台窗口里（默认挂载后 1.2 s 拉起 worker，`readiness` 就绪即报），
 不再挡 DSH 开窗；若你看到「第一次 `rust_exec` 很慢、之后很快」，那是该 lane 的 shell 首次冷启动，
@@ -423,6 +428,13 @@ packages/dsh-rust-exec/      host 插件 + 客户端叠加物 + 预编译 worker
 packages/dsh-rust-worker/    Rust 源码（main.rs / index.rs / session.rs / metrics.rs）
 tools/                       验收与基准脚本
   build_plugin.mjs           构建脚本：编译 → 换装 worker → npm pack → bin/ + dist/ + sha256
+  gen_corpus.mjs             生成 153 文件的基准语料（.bench-corpus）
+  bench_native_vs_rust.mjs   协议层对比：进程启动 vs 常驻 worker RPC
+  tool_latency.mjs           从会话日志重算逐工具真实耗时（tool/call → tool/result）
+  schema_tokens.mjs          统计每次请求的工具定义上下文税
+  reset_corpus.mjs           宏任务轮次之间复位语料
+  verify_low_il_fix.mjs      低完整性标签写拒绝的复现与修复验证
+  plugin_worker_probe.mjs    以插件身份拉起 worker、验证搬迁与写权限
 bin/                         最新安装包（keer1024-dsh-native-<版本>.tgz + .sha256，随仓库提交）
 docs/rust-exec-plugin/       设计、实测、发布、分发文档
 dist/                        历史打包产物（tarball + sha256，已 gitignore）

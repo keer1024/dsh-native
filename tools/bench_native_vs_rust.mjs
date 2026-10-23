@@ -293,3 +293,6 @@ mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, JSON.stringify(out, null, 2));
 log('\n' + JSON.stringify(out.summary, null, 2));
 log(`\nraw -> ${OUT}`);
+// The spawned worker and the rg/shell children keep handles open, so without an explicit
+// exit the script writes its results and then hangs — piping it into Select-Object times out.
+process.exit(0);
