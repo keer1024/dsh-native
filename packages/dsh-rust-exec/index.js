@@ -9,7 +9,19 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { cpus, homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
@@ -29,6 +41,8 @@ const START_TIMEOUT_MS = 15_000
 /** Extra time the plugin waits beyond a command's own timeout before killing the worker. */
 const SHELL_TIMEOUT_GRACE_MS = 5_000
 const MAX_STDERR_BYTES = 2_000
+/** A tool call slower than this is logged even when it succeeds. */
+const SLOW_CALL_MS = 5_000
 const SEARCH_TIMEOUT_MS = 60_000
 // A cold projection of a multi-megabyte log pays zstd decode + JSON parse once; the cache makes
 // later opens cheap, so this only bounds the worst-case first open.
@@ -245,6 +259,79 @@ const HOST_INSTANCE = randomUUID()
 
 const WINDOWS = process.platform === 'win32'
 
+/** Package version, read once for the diagnostics log (`unknown` if it is unavailable). */
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(PLUGIN_DIR, 'package.json'), 'utf8')).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
+// ---------------------------------------------------------------------------
+// Diagnostics: one JSONL log per host process
+// ---------------------------------------------------------------------------
+
+/**
+ * Plugin state outside the workspace. DSH's sandbox labels executables that live
+ * inside a workspace as Low integrity, and the Windows loader starts such an
+ * image at Low IL — where every write to a user-owned file fails with
+ * `拒绝访问`. A copy made here carries no label, so it runs at the host's own
+ * integrity instead (see `relocateWorker`).
+ */
+function pluginStateDir(...parts) {
+  const base = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+  return join(base, 'dsh-native', ...parts)
+}
+
+/** Rotate at 2 MB so a long-lived host cannot fill the disk with diagnostics. */
+const LOG_MAX_BYTES = 2_000_000
+/** Counters plus the last few failures, exposed through `/health`. */
+const RECENT_ERRORS = []
+const RECENT_ERROR_LIMIT = 20
+/** Executable path → integrity verdict, so a respawn does not re-run `icacls`. */
+const INTEGRITY_CACHE = new Map()
+let logPathCache = null
+
+function workerLogPath() {
+  logPathCache ??= pluginStateDir('logs', `rust-exec-${process.pid}.log`)
+  return logPathCache
+}
+
+/**
+ * Append one JSONL record. Diagnostics must never fail a tool call: a read-only
+ * home, a full disk or a locked file just drops the record.
+ */
+function logEvent(event, fields = {}) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), event, pid: process.pid, ...fields })
+  try {
+    const path = workerLogPath()
+    mkdirSync(dirname(path), { recursive: true })
+    if (existsSync(path) && statSync(path).size > LOG_MAX_BYTES) {
+      const previous = `${path}.1`
+      try {
+        rmSync(previous, { force: true })
+      } catch {
+        // A previous generation we cannot drop is not worth failing over.
+      }
+      renameSync(path, previous)
+    }
+    appendFileSync(path, `${line}\n`, 'utf8')
+  } catch {
+    // Best effort only.
+  }
+  if (process.env.DSH_RUST_DEBUG) console.error(`[dsh-native] ${line}`)
+}
+
+/** Remember a failure so `rust_health` can show it without opening a file. */
+function noteError(record) {
+  RECENT_ERRORS.push({ ts: new Date().toISOString(), ...record })
+  if (RECENT_ERRORS.length > RECENT_ERROR_LIMIT) RECENT_ERRORS.shift()
+}
+
+/** Errors that mean "the worker is not allowed to touch this path". */
+const ACCESS_DENIED = /拒绝访问|access is denied|access denied|os error 5\b|EPERM|EACCES/i
+
 /** Image name a lock file's pid must still be running before we signal it. */
 function workerImageName(workerPath) {
   return basename(workerPath).toLowerCase()
@@ -273,11 +360,97 @@ function probeWorkerImage(pid, expectedImage) {
       const row = probe.stdout.trim().split(/\r?\n/)[0] ?? ''
       const image = row.match(/^"([^"]+)"/)?.[1]?.toLowerCase()
       if (!image) return 'no'
-      return image === expectedImage ? 'yes' : 'no'
+      // A relocated worker runs from `dsh-rust-worker-<size>-<mtime>.exe`, which a
+      // lock file written before the relocation cannot name; compare the stem.
+      const stem = image.replace(/-\d+-\d+(\.exe)$/, '$1')
+      return stem === expectedImage ? 'yes' : 'no'
     }
     if (attempt < 2) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)
   }
   return 'unknown'
+}
+
+/**
+ * Integrity label of an executable *file*, as Windows will honour it at launch.
+ *
+ * Windows starts an image at the integrity level stamped on the file — `icacls`
+ * prints it as `Mandatory Label\Low Mandatory Level:(I)(NW)` — not at the level
+ * of the parent that spawned it. DSH's sandbox stamps that label on executables
+ * it finds inside a workspace, so the bundled worker becomes a Low-IL process:
+ * it runs commands and reads the whole disk, but a write to any file the user
+ * owns is denied with `拒绝访问 (os error 5)` while the host's own native tools
+ * write the same path fine. A plain copy drops the label, so `relocateWorker`
+ * starts the copy instead of the labelled original.
+ */
+function imageIntegrity(path) {
+  if (!WINDOWS) return 'unsupported'
+  const cached = INTEGRITY_CACHE.get(path)
+  if (cached) return cached
+  const probe = spawnSync('icacls', [path], { windowsHide: true, encoding: 'utf8', timeout: 8_000 })
+  const verdict = probe.error || typeof probe.stdout !== 'string'
+    ? 'unknown'
+    : /Low Mandatory Level/i.test(probe.stdout) ? 'low' : 'normal'
+  // The label is a property of the built image; a plugin reload is what changes it.
+  if (verdict !== 'unknown') INTEGRITY_CACHE.set(path, verdict)
+  return verdict
+}
+
+/**
+ * Copy the worker out of the workspace so it stops inheriting a Low-IL label,
+ * and return the path to the copy. One 2 MB copy per build: the name carries
+ * size + mtime, so a new build lands beside the old one instead of racing a
+ * worker that is still running from it.
+ */
+function relocateWorker(source) {
+  let fingerprint = 'unlabeled'
+  let sourceBytes = 0
+  try {
+    const info = statSync(source)
+    fingerprint = `${info.size}-${Math.round(info.mtimeMs)}`
+    sourceBytes = info.size
+  } catch {
+    // A copy under a stable name still runs; only the staleness check is lost.
+  }
+  const extension = WINDOWS ? '.exe' : ''
+  const target = join(pluginStateDir('bin'), `${basename(source, extension)}-${fingerprint}${extension}`)
+  // Re-copy a truncated leftover: spawning half an image fails with a bare
+  // "worker failed to start", which is much harder to read than a re-copy.
+  let complete = false
+  try {
+    complete = statSync(target).size === sourceBytes && sourceBytes > 0
+  } catch {
+    complete = false
+  }
+  if (!complete) {
+    mkdirSync(dirname(target), { recursive: true })
+    // Copy under a temporary name first, so a spawn never sees a partial file.
+    // The pid keeps two workers spawning at once from writing the same temp path.
+    const partial = `${target}.partial-${process.pid}`
+    copyFileSync(source, partial)
+    renameSync(partial, target)
+    pruneWorkerCopies(dirname(target), target)
+  }
+  return target
+}
+
+/** Keep the live copy plus one older generation; the rest are stale builds. */
+function pruneWorkerCopies(dir, keep) {
+  try {
+    const stale = readdirSync(dir)
+      .filter((name) => name.toLowerCase().endsWith(WINDOWS ? '.exe' : ''))
+      .filter((name) => join(dir, name) !== keep)
+      .map((name) => ({ name, mtime: statSync(join(dir, name)).mtimeMs }))
+      .sort((left, right) => right.mtime - left.mtime)
+    for (const { name } of stale.slice(1)) {
+      try {
+        rmSync(join(dir, name), { force: true })
+      } catch {
+        // Housekeeping only.
+      }
+    }
+  } catch {
+    // Pruning never fails a spawn.
+  }
 }
 
 /**
@@ -364,6 +537,10 @@ export class RustWorker {
   #activityGaps = []
   /** `hello` + `initialize` results, kept for diagnostics; null while stopped. */
   info = null
+  /** Path actually spawned: the relocated copy when the source carried a Low-IL label. */
+  #launchPath = null
+  /** `low` / `normal` / `unknown` — integrity Windows starts the source image at. */
+  #integrity = null
 
   constructor(workerPath, options = {}) {
     this.workerPath = workerPath
@@ -400,14 +577,50 @@ export class RustWorker {
   /** Send one JSON-RPC request, starting the worker on demand. */
   async call(method, params, timeoutMs, signal) {
     await this.start()
+    const startedAt = performance.now()
     try {
-      return await this.#request(method, params, timeoutMs, signal)
+      const result = await this.#request(method, params, timeoutMs, signal)
+      const elapsedMs = performance.now() - startedAt
+      // A call this slow is worth a line in the log even when it succeeded: it is
+      // how a cold index build or a wedged lane shows up after the fact.
+      if (elapsedMs > SLOW_CALL_MS) {
+        logEvent('tool.slow', { method, elapsedMs: Math.round(elapsedMs), path: params?.path ?? null })
+      }
+      return result
     } catch (error) {
+      this.#logFailure(method, params, error, performance.now() - startedAt)
       // A local timeout leaves the worker in an unknown state; drop it so the
       // next call gets a fresh child instead of a wedged one.
       if (error?.code === 'WORKER_TIMEOUT') this.kill('rust worker killed after a request timeout')
       throw error
     }
+  }
+
+  /**
+   * Record why a call failed, and turn a bare `os error 5` into something the
+   * reader can act on: which worker, at what integrity, and where the log is.
+   */
+  #logFailure(method, params, error, elapsedMs) {
+    const message = error?.message ?? String(error)
+    const record = {
+      method,
+      path: typeof params?.path === 'string' ? params.path : null,
+      code: error?.code ?? null,
+      elapsedMs: Math.round(elapsedMs),
+      workerPid: this.#child?.pid ?? null,
+      integrity: this.#integrity,
+      message: message.slice(0, 600),
+    }
+    logEvent('tool.error', record)
+    noteError(record)
+    if (!ACCESS_DENIED.test(message)) return
+    const workerPath = this.#launchPath ?? this.workerPath
+    const relocated = this.#launchPath && this.#launchPath !== this.workerPath
+    error.message = `${message}\n\n[dsh-native] write denied for ${record.path ?? 'this path'}. `
+      + `Worker image: ${workerPath} (source label: ${this.#integrity ?? 'unknown'}`
+      + `${relocated ? ', running a relocated copy' : ''}). `
+      + `Causes, in order: a deny ACE or read-only attribute on the path; a locked file; `
+      + `the worker itself starting at Low integrity. Log: ${workerLogPath()}`
   }
 
   /** Lifecycle snapshot: local counters merged with the worker's own view. */
@@ -423,6 +636,15 @@ export class RustWorker {
       lastExitCode: this.#lastExitCode,
       inboundGapP50: percentile(this.#activityGaps, 50),
       inboundGapP99: percentile(this.#activityGaps, 99),
+      // Which image actually runs, and whether it had to be relocated to escape
+      // DSH's Low-integrity workspace label. `rust_health` answers "why can't the
+      // worker write this file?" without anyone reading the log first.
+      workerPath: this.#launchPath ?? this.workerPath,
+      sourceWorkerPath: this.workerPath,
+      relocated: Boolean(this.#launchPath && this.#launchPath !== this.workerPath),
+      integrity: this.#integrity,
+      logPath: workerLogPath(),
+      recentErrors: RECENT_ERRORS.slice(-5),
     }
     if (!this.#child) return local
     try {
@@ -511,9 +733,40 @@ export class RustWorker {
     dropStaleLock(text)
   }
 
+  /**
+   * Which image to run. A worker started from inside a DSH workspace is a
+   * Low-integrity process (see `imageIntegrity`), and such a worker cannot write
+   * anything the user owns — `rust_write` / `rust_edit` fail with `拒绝访问`
+   * while the host's own tools write the same path fine. Relocating to a copy
+   * outside the workspace costs one 2 MB copy per build and restores writes.
+   */
+  #resolveLaunchPath() {
+    this.#integrity = imageIntegrity(this.workerPath)
+    if (this.#integrity !== 'low') return (this.#launchPath = this.workerPath)
+    try {
+      const launched = relocateWorker(this.workerPath)
+      logEvent('worker.relocated', { source: this.workerPath, launchPath: launched })
+      return (this.#launchPath = launched)
+    } catch (error) {
+      logEvent('worker.relocate-failed', { source: this.workerPath, error: error?.message })
+      return (this.#launchPath = this.workerPath)
+    }
+  }
+
   async #spawn() {
+    const startedAt = performance.now()
     this.#reapStale()
-    const child = spawn(this.workerPath, [], {
+    const launchPath = this.#resolveLaunchPath()
+    logEvent('worker.spawn', {
+      source: this.workerPath,
+      launchPath,
+      integrity: this.#integrity,
+      relocated: launchPath !== this.workerPath,
+      cwd: WORKER_CWD,
+      lanes: this.options.lanes,
+      version: PLUGIN_VERSION,
+    })
+    const child = spawn(launchPath, [], {
       cwd: WORKER_CWD,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -567,6 +820,13 @@ export class RustWorker {
     this.#failCount = 0
     this.#restartAt = 0
     this.#startHeartbeat()
+    logEvent('worker.ready', {
+      workerPid: workerPid > 0 ? workerPid : null,
+      launchPath,
+      integrity: this.#integrity,
+      protocol: welcome?.protocol ?? HELLO_VERSION,
+      startupMs: Math.round(performance.now() - startedAt),
+    })
     return this.info
   }
 
@@ -597,6 +857,12 @@ export class RustWorker {
       }
     }
     const detail = this.#stderr.trim()
+    logEvent('worker.exit', {
+      message,
+      pid: dyingPid ?? null,
+      restarts: this.#restarts,
+      stderr: detail.slice(-500),
+    })
     if (process.env.DSH_RUST_DEBUG) {
       console.error(`[rust-worker] died: ${message}\n  pid: ${dyingPid} restarts: ${this.#restarts}\n  stderr: ${detail.slice(-2000) || '(empty)'}`)
     }
@@ -731,6 +997,7 @@ export class RustWorker {
     this.#failCount += 1
     const delay = RESTART_BACKOFF_MS[Math.min(this.#failCount, RESTART_BACKOFF_MS.length - 1)]
     this.#restartAt = Date.now() + delay
+    logEvent('worker.restart-scheduled', { failCount: this.#failCount, delayMs: delay })
   }
 
   /** Fire-and-forget frame: no id, no pending entry, chained with real requests. */
@@ -2742,6 +3009,14 @@ export function apply(ctx, config) {
     injected: inject,
   }
   log.info('plugin.applied', hostInfo)
+  logEvent('plugin.mounted', {
+    version: PLUGIN_VERSION,
+    workerSource: settings.workerPath,
+    cwd: WORKER_CWD,
+    lanes: settings.lanes,
+    deferStart: settings.deferStart,
+    logPath: workerLogPath(),
+  })
   // Async startup: DSH paints first, the worker follows. Nothing below blocks the
   // plugin mount, and the metrics tick stays quiet until the worker answers so the
   // sampler cannot spawn it ahead of the schedule.

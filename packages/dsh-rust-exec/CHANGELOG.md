@@ -2,6 +2,42 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.6.1 — 2026-10-23
+
+Diagnostics and the fix for `拒绝访问 (os error 5)` on `rust_write` / `rust_edit` / shell writes.
+
+### Fixed — the worker no longer runs at Low integrity
+- DSH's sandbox stamps `Mandatory Label\Low Mandatory Level` on executables that live inside a
+  workspace, and Windows starts such an image at Low IL even when the parent is High. The worker
+  could run commands and read the whole disk, but a write to any file the user owns was denied —
+  which is what `rust_write`, `rust_edit` and `Set-Content` via `rust_exec` hit.
+- The label travels with the file, not with the path or the parent, so `relocateWorker()` copies
+  the image to `%LOCALAPPDATA%\dsh-native\bin\dsh-rust-worker-<size>-<mtime>.exe` (unlabelled,
+  atomic `.partial` + rename, one older generation kept) and spawns that copy. A worker installed
+  outside a workspace is left alone: `imageIntegrity()` runs `icacls` once and only relocates on a
+  `low` verdict.
+- `#reapStale` compares image stems, so a lock left by a relocated worker still matches
+  `dsh-rust-worker.exe` instead of leaking an orphan (`tasklist` sees the copy's file name).
+- Proof: `node tools/verify_low_il_fix.mjs` — original image: read ok, write denied; relocated
+  copy: write ok, 21 bytes.
+
+### Added — a diagnostics log you can read after the fact
+- `%LOCALAPPDATA%\dsh-native\logs\rust-exec-<host pid>.log`, JSONL, one line per event, rotated at
+  2 MB to `.1`. Records `plugin.mounted` (version, worker source, cwd, lanes), `worker.relocated`
+  / `worker.relocate-failed`, `worker.spawn`, `worker.ready` (pid, protocol, startup ms),
+  `worker.exit` (exit message + last 500 bytes of stderr), `worker.restart-scheduled`,
+  `tool.error` (method, path, code, worker pid, integrity, message) and `tool.slow` (>5 s).
+- `rust_health` (and `/health`) now reports `workerPath`, `sourceWorkerPath`, `relocated`,
+  `integrity`, `logPath` and `recentErrors`, so "why can't the worker write this file?" is
+  answerable from a chat instead of from a stack trace.
+- An access-denied failure now carries an actionable hint: which image runs, at what integrity,
+  and where the log is — instead of a bare `os error 5`.
+
+### Known limitation
+- If a policy labels the relocated copy as well, writes stay denied; the log and the hint then
+  name the path and the integrity level, which is the fastest way to tell that apart from a
+  read-only directory.
+
 ## 1.6.0 — 2026-10-23
 
 Async start plus the monitor redesign: DSH paints first and the worker follows, and the panel

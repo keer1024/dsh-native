@@ -227,6 +227,18 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 锁文件：`<DSH_HOME>/run/dsh-rust-worker-<profile>.lock`，内容两行 `pid` + 宿主实例 UUID。
 **由宿主写**（低完整性 worker 写不了），回收前会核对进程镜像名，绝不按 pid 盲杀。
 
+**1.6.1 起不再从带标签的镜像启动**：DSH 沙箱会给工作区里的 exe 打 `Low Mandatory Level`
+标签，而 Windows 按**文件**标签（不是父进程）决定进程完整性 —— 低完整性 worker 能读能算，
+但写用户文件一律 `拒绝访问 (os error 5)`。插件启动前用 `icacls` 读标签，判定为 `low` 时把
+exe 复制到 `%LOCALAPPDATA%\dsh-native\bin\dsh-rust-worker-<size>-<mtime>.exe`（副本无标签，
+按宿主完整性运行）再拉起；装在工作区之外、本来就没标签的镜像保持原样。
+
+诊断日志：`%LOCALAPPDATA%\dsh-native\logs\rust-exec-<宿主 pid>.log`（JSONL，2 MB 轮转到 `.1`），
+记录 `plugin.mounted` / `worker.relocated` / `worker.spawn` / `worker.ready` / `worker.exit` /
+`worker.restart-scheduled` / `tool.error` / `tool.slow`。`rust_health` 与 `/health` 回报
+`workerPath`、`relocated`、`integrity`、`logPath`、`recentErrors`，写失败时错误里直接附带
+worker 镜像、完整性判定和日志路径。
+
 
 ## 9. 界面细节
 
@@ -299,7 +311,7 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 | 重启后报 `web boot: 1 entry did not activate` / `duplicate factory registration` | `package.json` 的 `name` 与 `client.js` 注册 id、`cordis.patch.yml` 不一致 | `node tools\check_client_identity.mjs` 定位；三处必须同名 |
 | 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `@keer1024/dsh-native`（只写 `dependencies` 不够） | 补 bundles + `pnpm install` + 重启 |
 | 面板 401 / 404 | 浏览器没带凭据，或路由没挂上 | 看 `/health` 的 `routes.registered`；404 会退避重挂 |
-| 工具报 `拒绝访问 (os error 5)` 写 `%TEMP%` / `~/.dsh` | worker 是低完整性进程（从工作区启动的镜像带 Low IL 标签） | 预期限制：只能写工作区；锁文件与缓存由宿主代写 |
+| 工具报 `拒绝访问 (os error 5)` 写 `%TEMP%` / `~/.dsh` | 旧版（≤1.6.0）worker 是低完整性进程；1.6.1 已把镜像搬到 `%LOCALAPPDATA%\dsh-native\bin` 再启动 | 先看错误里的 `[dsh-native]` 提示与 `rust_health.logPath`；仍拒绝则多半是 deny ACE / 只读 / 文件被占用 |
 | 首次 `exec` 3–20 s | PowerShell 进程冷启动 | 正常；已在启动期预热 |
 | 强杀 worker 后残留 `powershell.exe` | Windows 不杀进程树 | `kill()` 用 `taskkill /T`；新 worker 启动时再扫一遍死父进程的 shell |
 | 状态条/视图不更新 | 页面还是旧 client bundle | 刷新页面；仍不行则重启 DSH |
@@ -324,6 +336,8 @@ node tools\monitor_render_test.mjs               # 监控器 min/max 卡片、sp
 node tools\head_open_test.mjs                    # 会话首屏 head 模式
 node tools\session_probe.mjs                     # 会话投影冷/热/分页实测
 node tools\p2_bench.mjs                          # 同召回 token 降幅
+node tools\verify_low_il_fix.mjs                 # 2 项：带 Low 标签的原镜像写拒绝 / 搬迁副本写成功
+node tools\plugin_worker_probe.mjs               # 1 项：直接拉起部署版 RustWorker，验证 relocated + 写工作区
 ```
 
 最近一次全量（2026-10-22）：identity 20/20、worker 15/15、lifecycle 10/10、pool 10/10、
@@ -338,7 +352,9 @@ reap 7/7、sweep 3/3，渲染与路由脚本全绿。
 - **DSH**：实测 0.2.1-rc.2 / Electron 44 / Node 24；DSH 仍在 rc，插件契约可能变。
 - **Node**：host 插件只用 `node:` 内置模块，≥22 即可。
 - **只读投影**：真相源仍是 DSH 会话日志，插件不写回；投影可丢弃可重建。
-- **低完整性**：从工作区启动的镜像只能写工作区（见排障表）。
+- **低完整性**：1.6.1 起 worker 从 `%LOCALAPPDATA%\dsh-native\bin` 的副本启动，不再继承 DSH
+  给工作区镜像打的 Low IL 标签；若某台机器的策略把副本也打了标，日志与错误提示会指名道姓
+  报出来（见排障表）。
 - **分发状态**：包名 `@keer1024/dsh-native`，npm 上尚未上架（已登录 `keer1024`，发布卡在 2FA）；
   当前通过 tarball / 目录 link 分发，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
 
