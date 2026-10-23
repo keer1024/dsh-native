@@ -2,6 +2,40 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.6.0 — 2026-10-23
+
+Async start plus the monitor redesign: DSH paints first and the worker follows, and the panel
+shows one row per class instead of two tables at the bottom.
+
+### Changed — the worker starts after the host, not during it
+- `deferStart` (default `true`) schedules `pool.start()` `startDelayMs` (default 1200 ms) after
+  the plugin mounts; `prewarmIndex` (default `true`) now warms the code index *after* the worker
+  answers instead of at process start. The sidecar honours `DSH_RUST_PREWARM=0`, which skips
+  both the index prewarm thread and the PowerShell lane prewarm.
+- `/health` reports `phase: pending | starting | ready | failed` plus `readiness`
+  (`readyMs`, `workerPid`, `index`, `error`). A probe while `pending` counts as a demand signal
+  and starts the worker immediately, so a page refresh never waits out the delay.
+  `/metrics` carries the same object, so the panel and the route cannot disagree.
+- The metrics sampler stays quiet until `phase` is `ready`: the one-second tick can no longer
+  spawn the worker ahead of the schedule.
+- The panel jumps its next poll forward the moment `phase` turns `ready`, then refills
+  `/metrics`, `/sessions`, `/health` and `/cache` without a page reload.
+
+### Changed — monitor cards
+- Worker, session and cache cards are two-column, ~196–244 px wide, with a 9 px label above an
+  11 px value; every value keeps a `title` with the full text.
+- Session cards carry a status dot (green while `inflight > 0`, muted when idle) with
+  `aria-label` and `title`, so the state is never colour-only.
+- The chart block moved under the worker row and follows the selected card: `worker #id · pid`,
+  one two-minute series per metric read from `/metrics.workers[i].history`. The global ring
+  stays as the fallback when only one worker is running.
+- The trailing `Workers (lanes)` and `会话进行时` tables are gone; the per-class rows and the
+  chart block replace them.
+
+### Fixed
+- `MetricsStore.readiness` was never linked to the runtime object, so `/metrics` reported
+  `readiness: null` while `/health` reported the live phase.
+
 ## 1.5.1 — 2026-10-23
 
 ### Changed — the status strip reads as `label: value - label: value`

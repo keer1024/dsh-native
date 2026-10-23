@@ -71,6 +71,10 @@ const SOFT_LIMIT_DROP_COOLDOWN_MS = 60_000
 
 // Metrics: 1 s sampling, ~5 min of fast points, 1 min buckets for the long view.
 const DEFAULT_METRICS_INTERVAL_MS = 1_000
+// Delay between plugin mount and the first worker spawn. Long enough that DSH's
+// own startup and first paint are done, short enough that the first tool call
+// almost never waits (a call starts the worker immediately anyway).
+const DEFAULT_START_DELAY_MS = 1_200
 const METRICS_FAST_POINTS = 300
 const METRICS_SLOW_BUCKETS = 60
 const METRICS_SLOW_BUCKET_MS = 60_000
@@ -208,6 +212,16 @@ function normalizeConfig(value) {
     // line count and therefore every line number. Opt-in — default off so a read
     // always returns the bytes on disk unless the caller asks for the cheap view.
     compactReads: raw.compactReads === true,
+    // Startup is asynchronous by default: the plugin mounts without waiting for a
+    // worker, then starts it ~1.2 s later so DSH's own boot is never behind a cold
+    // index build or four PowerShell starts. Set deferStart:false to start inline.
+    deferStart: raw.deferStart !== false,
+    startDelayMs: typeof raw.startDelayMs === 'number' && raw.startDelayMs >= 0 && raw.startDelayMs <= 30_000
+      ? raw.startDelayMs
+      : DEFAULT_START_DELAY_MS,
+    // The worker skips index prewarm when this is false; the host triggers the
+    // build once the plugin reports ready, so nothing competes with DSH startup.
+    prewarmIndex: raw.prewarmIndex !== false,
   }
 }
 
@@ -511,6 +525,9 @@ export class RustWorker {
         DSH_RUST_LANES: String(this.options.lanes),
         DSH_RUST_MAX_QUEUE: String(this.options.maxQueueDepth),
         DSH_RUST_PROFILE: process.env.DSH_PROFILE ?? 'default',
+        // 0 = no index prewarm and no lane prewarm at spawn; the host asks for the
+        // index build once DSH is up, and lanes start on their first call.
+        DSH_RUST_PREWARM: this.options.prewarmIndex === false ? '0' : '1',
       },
     })
     this.#child = child
@@ -1948,10 +1965,25 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         render: (_args, value) => textOf(renderHealth(value)),
       },
       async execute() {
+        // Readiness first: a deferred start means the worker may not exist yet, and
+        // health must still answer (the monitor shows "starting…" instead of an error).
+        if (runtime.readiness && runtime.readiness.phase !== 'ready') {
+          return {
+            schema: 'dsh-rust-exec/health@1',
+            running: false,
+            phase: runtime.readiness.phase,
+            readiness: runtime.readiness,
+            routes: runtime.routes ?? null,
+            tools: runtime.activeTools ? runtime.activeTools() : null,
+            metrics: null,
+          }
+        }
         const health = await pool.health()
         const metrics = store?.snapshot()
         return {
           ...health,
+          phase: runtime.readiness?.phase ?? 'ready',
+          readiness: runtime.readiness ?? null,
           routes: runtime.routes ?? null,
           tools: runtime.activeTools ? runtime.activeTools() : null,
           metrics: metrics
@@ -2136,6 +2168,14 @@ class MetricsStore {
     // Host-process lifetime extremes: cleared by a DSH restart, survives a page
     // refresh (the ring itself only covers ~2 minutes).
     this.extremes = { since: Date.now(), samples: 0, fields: {} }
+    // Started/ready state owned by apply(); the monitor renders placeholders until
+    // it flips to 'ready' instead of showing a panel full of dashes.
+    this.readiness = null
+    // Returns false while startup is deferred so the tick cannot spawn the worker.
+    this.gate = null
+    // Per-worker rings, keyed by worker id: the monitor draws one set of charts per
+    // worker, and a flat ring cannot attribute a sample to a worker when N > 1.
+    this.workerHistory = new Map()
   }
 
   start() {
@@ -2160,6 +2200,15 @@ class MetricsStore {
   }
 
   async #tick() {
+    // Async startup: sampling a worker that has not been started yet would spawn it
+    // on the metrics timer, which is exactly what deferred start avoids. A worker that
+    // some other path already started (a tool call runs `pool.call`, and that awaits
+    // `start()`) is adopted instead of ignored, so readiness cannot stay `pending`
+    // while a live worker serves calls.
+    if (this.gate && !this.gate()) {
+      this.onDemand?.()
+      return
+    }
     try {
       const raw = await this.pool.sample()
       // Soft limits only shed/pause the index; exec and fs calls are never throttled.
@@ -2182,6 +2231,14 @@ class MetricsStore {
     this.last = { ...point }
     this.fast.push(point)
     while (this.fast.length > METRICS_FAST_POINTS) this.fast.shift()
+    const detail = point.pool?.workersDetail ?? []
+    if (detail.length === 1) {
+      const key = String(detail[0].id ?? 0)
+      const ring = this.workerHistory.get(key) ?? []
+      ring.push(point)
+      while (ring.length > METRICS_FAST_POINTS) ring.shift()
+      this.workerHistory.set(key, ring)
+    }
     this.#bucket.push(point)
     if (now - this.#bucketStart >= METRICS_SLOW_BUCKET_MS) {
       this.slow.push(this.#foldBucket())
@@ -2232,6 +2289,7 @@ class MetricsStore {
       pool: this.pool.info(),
       workers: this.#workersPayload(),
       cache: this.#cachePayload(),
+      readiness: this.readiness ?? null,
       config: {
         lanes: this.pool.lanesPerWorker,
         maxQueueDepth: this.pool.options.maxQueueDepth,
@@ -2258,6 +2316,9 @@ class MetricsStore {
       privateBytes: single ? last?.privateBytes ?? null : null,
       uptimeMs: null,
       restarts: null,
+      // Chart series for this worker; empty when the host never had exactly one
+      // running worker, in which case the monitor falls back to the global ring.
+      history: this.workerHistory.get(String(worker.id)) ?? [],
     }))
   }
 
@@ -2468,10 +2529,30 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
     {
       path: `${METRICS_ROUTE_PREFIX}/health`,
       handler: async (_req, res) => {
+        const readiness = state.readiness ?? null
+        // Probing /health counts as a demand signal: a page refresh right after DSH
+        // opens should not have to wait out the start delay.
+        if (readiness && readiness.phase === 'pending') state.ensureStarted?.()
+        if (readiness && readiness.phase !== 'ready') {
+          send(res, 200, {
+            schema: 'dsh-rust-exec/pool-health@1',
+            running: false,
+            worker: null,
+            phase: readiness.phase,
+            readiness,
+            routes: routeState,
+          })
+          return
+        }
         try {
-          send(res, 200, { ...(await pool.health()), routes: routeState })
+          send(res, 200, {
+            ...(await pool.health()),
+            phase: readiness?.phase ?? 'ready',
+            readiness,
+            routes: routeState,
+          })
         } catch (error) {
-          send(res, 500, { error: error?.message ?? String(error) })
+          send(res, 500, { error: error?.message ?? String(error), readiness })
         }
       },
     },
@@ -2661,8 +2742,93 @@ export function apply(ctx, config) {
     injected: inject,
   }
   log.info('plugin.applied', hostInfo)
-  // Detached prewarm: spawn the first worker now so the first tool call skips boot.
-  pool.start().catch((error) => log.warn('pool.prewarm-failed', { error: error?.message }))
+  // Async startup: DSH paints first, the worker follows. Nothing below blocks the
+  // plugin mount, and the metrics tick stays quiet until the worker answers so the
+  // sampler cannot spawn it ahead of the schedule.
+  runtime.readiness = {
+    phase: 'pending',
+    since: Date.now(),
+    startedAt: null,
+    readyAt: null,
+    readyMs: null,
+    deferred: settings.deferStart,
+    startDelayMs: settings.startDelayMs,
+    prewarmIndex: settings.prewarmIndex,
+    workerPid: null,
+    indexPrewarm: 'idle',
+    error: null,
+  }
+  let warmPromise = null
+  /** Build the index once, after the worker is up, instead of at spawn time. */
+  const warmIndex = () => {
+    if (!settings.prewarmIndex) return Promise.resolve(null)
+    if (warmPromise) return warmPromise
+    runtime.readiness.indexPrewarm = 'running'
+    warmPromise = pool.call('index.status', { refresh: true }, 600_000, undefined, 'http')
+      .then((status) => {
+        runtime.readiness.indexPrewarm = 'done'
+        runtime.readiness.index = {
+          files: status?.files ?? null,
+          symbols: status?.symbols ?? null,
+          buildMs: status?.buildMs ?? null,
+        }
+        log.info('index.warmed', runtime.readiness.index)
+        return status
+      })
+      .catch((error) => {
+        runtime.readiness.indexPrewarm = 'failed'
+        log.warn('index.warm-failed', { error: error?.message })
+        return null
+      })
+    return warmPromise
+  }
+  runtime.ensureStarted = () => {
+    if (runtime.startPromise) return runtime.startPromise
+    runtime.readiness.phase = 'starting'
+    runtime.readiness.startedAt = Date.now()
+    // The pid only exists once the child process is up, which is after `start()` resolves
+    // in some hosts and after its first handshake in others; probe twice, cheaply.
+    const adoptPid = () => {
+      const pid = pool.info()?.workersDetail?.[0]?.pid ?? null
+      if (pid) runtime.readiness.workerPid = pid
+      return pid
+    }
+    runtime.startPromise = pool.start()
+      .then(() => {
+        adoptPid()
+        runtime.readiness.phase = 'ready'
+        runtime.readiness.readyAt = Date.now()
+        runtime.readiness.readyMs = runtime.readiness.readyAt - runtime.readiness.since
+        if (!runtime.readiness.workerPid) {
+          const pidTimer = setTimeout(adoptPid, 800)
+          pidTimer.unref?.()
+        }
+        log.info('pool.ready', { ms: runtime.readiness.readyMs, pid: runtime.readiness.workerPid })
+        void warmIndex()
+        return pool.info()
+      })
+      .catch((error) => {
+        runtime.readiness.phase = 'failed'
+        runtime.readiness.error = error?.message ?? String(error)
+        log.warn('pool.prewarm-failed', { error: runtime.readiness.error })
+        return null
+      })
+    return runtime.startPromise
+  }
+  store.gate = () => runtime.readiness.phase === 'ready'
+  // When a tool call starts the worker before the deferred timer fires, this closes the loop:
+  // the next metrics tick asks for the real start state and flips readiness to `ready`.
+  store.onDemand = () => { void runtime.ensureStarted() }
+  // `/metrics` renders the same readiness object the panel polls through `/health`, so the
+  // two views can never disagree about whether the worker is up.
+  store.readiness = runtime.readiness
+  if (settings.deferStart) {
+    const startTimer = setTimeout(() => { void runtime.ensureStarted() }, settings.startDelayMs)
+    startTimer.unref?.()
+    ctx.effect(() => () => { clearTimeout(startTimer) }, 'rust-exec start timer')
+  } else {
+    void runtime.ensureStarted()
+  }
 
   ctx.effect(() => {
     if (!host.capabilities.toolsRegister) {

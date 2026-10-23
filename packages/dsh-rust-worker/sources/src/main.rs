@@ -316,8 +316,18 @@ fn main() {
     let pool = Arc::new(LanePool::new(lane_count()));
     LAST_HOST_SEEN_MS.store(mono_ms(), Ordering::SeqCst);
 
+    // Startup work is deferrable: `DSH_RUST_PREWARM=0` makes the worker answer
+    // requests immediately and leaves the index build and every lane start to the
+    // first real call (lanes start lazily through `ensure_alive`). The host sets
+    // this when it wants DSH to open without waiting for a cold index.
+    let prewarm_enabled = std::env::var("DSH_RUST_PREWARM")
+        .map(|raw| raw.trim() != "0")
+        .unwrap_or(true);
+
     // Warm the code index in the background so the first search does not pay for it.
-    std::thread::spawn(index::prewarm);
+    if prewarm_enabled {
+        std::thread::spawn(index::prewarm);
+    }
 
     // A force-killed worker cannot reap its PowerShell grandchild (the child
     // inherits the pipes, so the parent's wait never completes). Sweep shells
@@ -327,7 +337,7 @@ fn main() {
     // Prewarm every lane in parallel: pay the PowerShell start cost at plugin
     // load, not on the first tool call. Starting them one after another would
     // cost N x the cold start, so each lane gets its own thread.
-    {
+    if prewarm_enabled {
         let pool2 = Arc::clone(&pool);
         std::thread::spawn(move || {
             let mut handles = Vec::with_capacity(pool2.len());

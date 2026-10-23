@@ -1,9 +1,9 @@
 {
   "name": "@keer1024/dsh-native",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "type": "module",
   "main": "./index.js",
-  "description": "dsh-native: resident Rust worker (lane pool, session affinity, soft RSS/CPU limits) for command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; host-side JSON-RPC middleware with 7 HTTP routes, plus a pinned projection view, a Grafana-style monitor and the R-Native status strip.",
+  "description": "dsh-native: resident Rust worker (lane pool, session affinity, soft RSS/CPU limits) for command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; host-side JSON-RPC middleware with 8 HTTP routes, plus a pinned projection view, a Grafana-style monitor and the R-Native status strip.",
   "keywords": [
     "dsh",
     "dsh-plugin",
