@@ -200,6 +200,14 @@ function normalizeConfig(value) {
     cpuSoftLimitPct: typeof raw.cpuSoftLimitPct === 'number' && raw.cpuSoftLimitPct >= 10
       ? raw.cpuSoftLimitPct
       : 70,
+    // Progressive disclosure: publish four resident tools plus native_help and let
+    // the model activate the rest on demand (10 resident schemas cost 1,812 tokens
+    // on every request; the resident four cost ~500). Set false to publish all ten.
+    progressiveDisclosure: raw.progressiveDisclosure !== false,
+    // Text compression for reads: strip comments and fold indentation, keeping the
+    // line count and therefore every line number. Opt-in — default off so a read
+    // always returns the bytes on disk unless the caller asks for the cheap view.
+    compactReads: raw.compactReads === true,
   }
 }
 
@@ -788,17 +796,44 @@ function trimTail(text) {
   return typeof text === 'string' ? text.replace(/\r?\n$/, '') : ''
 }
 
+/**
+ * Model-facing paths are workspace-relative. A full Windows path costs ~26 extra
+ * tokens per occurrence, and a search result repeats the path on every hit, so
+ * this is the single largest token win on the render side.
+ */
+function relPath(value) {
+  const text = typeof value === 'string' ? value : ''
+  if (!text) return ''
+  const root = WORKER_CWD.endsWith(sep) ? WORKER_CWD.slice(0, -1) : WORKER_CWD
+  // The worker reports forward slashes on every platform; compare both spellings.
+  const normalized = sep === '\\' ? text.split('/').join('\\') : text.split('\\').join('/')
+  return normalized.startsWith(root + sep) ? normalized.slice(root.length + 1) : normalized
+}
+
+/**
+ * 16 hex chars identify a content version as well as 64 do, for a quarter of the
+ * tokens. `rust_write` accepts a prefix as expectedHash, so the footer can stay short.
+ */
+const HASH_PREFIX = 16
+function shortHash(hash) {
+  return typeof hash === 'string' && hash.length > HASH_PREFIX ? hash.slice(0, HASH_PREFIX) : (hash ?? '')
+}
+
 function renderExec(value) {
-  const { exitCode, stdout, ms, wallMs, reused, lane, queueMs, aborted } = value
+  const { exitCode, stdout, ms, wallMs, queueMs, aborted, truncated, totalBytes, shownBytes } = value
   const body = trimTail(stdout)
   if (aborted) {
     const stamp = `[aborted · ${typeof wallMs === 'number' ? `${wallMs} ms wall` : 'call cancelled'}]`
     return body ? `${body}\n${stamp}` : stamp
   }
-  const timing = typeof wallMs === 'number' ? `${wallMs} ms wall · ${ms} ms shell` : `${ms} ms`
-  const laneLabel = typeof lane === 'number' ? ` · lane ${lane}` : ''
+  const timing = typeof wallMs === 'number' ? `${wallMs} ms` : `${ms} ms`
   const queueLabel = typeof queueMs === 'number' && queueMs > 0 ? ` · queued ${queueMs} ms` : ''
-  const stamp = `[exit ${exitCode} · ${timing} · ${reused ? 'warm' : 'cold'} shell${laneLabel}${queueLabel}]`
+  // A capped stdout must say so, and say how much is missing, or the model will
+  // reason over a silently truncated body.
+  const cut = truncated
+    ? ` · stdout cut at ${shownBytes ?? '?'} B of ${totalBytes ?? '?'} B: narrow the command or add | Select-Object -First N`
+    : ''
+  const stamp = `[exit ${exitCode} · ${timing}${queueLabel}${cut}]`
   return body ? `${body}\n${stamp}` : stamp
 }
 
@@ -810,6 +845,8 @@ function renderExec(value) {
 const READ_CACHE_LIMIT = 256
 const READ_CACHE_TTL_MS = 5 * 60_000
 const readCache = new Map()
+/** Hit/miss counters for the observation cache, surfaced by `/metrics.cache.read`. */
+const readCacheStats = { hits: 0, misses: 0 }
 
 function readCacheKey(exec, params) {
   return `${exec?.agent?.id ?? 'default'}|${params.path}|${params.offset ?? 1}|${params.limit ?? ''}`
@@ -818,14 +855,37 @@ function readCacheKey(exec, params) {
 /** Age of an identical earlier read in ms, or 0 when the body must be printed. */
 function recallRead(key, hash) {
   const hit = readCache.get(key)
-  if (!hit) return 0
-  if (hit.hash !== hash) return 0
+  if (!hit) {
+    readCacheStats.misses += 1
+    return 0
+  }
+  if (hit.hash !== hash) {
+    readCacheStats.misses += 1
+    return 0
+  }
   const age = Date.now() - hit.at
   if (age > READ_CACHE_TTL_MS) {
     readCache.delete(key)
+    readCacheStats.misses += 1
     return 0
   }
+  readCacheStats.hits += 1
   return age
+}
+
+/** Footprint of the observation cache: entry count, an upper-bound byte estimate
+ *  (key strings dominate; the stored hash is fixed width), and hit/miss totals. */
+function readCacheSnapshot() {
+  let bytes = 0
+  for (const [key] of readCache) bytes += key.length * 2 + 80
+  return {
+    entries: readCache.size,
+    limit: READ_CACHE_LIMIT,
+    ttlMs: READ_CACHE_TTL_MS,
+    bytes,
+    hits: readCacheStats.hits,
+    misses: readCacheStats.misses,
+  }
 }
 
 function rememberRead(key, hash) {
@@ -849,11 +909,52 @@ function completeness(value, shownKey, totalKey) {
   return `truncated by ${why}${omitted !== null ? ` · omitted ${omitted}` : ''} · complete=false`
 }
 
-function renderRead(value) {
-  if (typeof value.unchangedForMs === 'number' && value.unchangedForMs > 0) {
-    return `[unchanged · ${value.path} · ${value.totalLines} lines · ${value.totalBytes} bytes · `
-      + `sha256 ${value.hash} · identical to the read ${Math.round(value.unchangedForMs / 1000)} s ago `
-      + '· pass refresh: true to print it again]'
+/**
+ * Lossless-by-line-number compaction for reads: comment-only lines become empty
+ * lines (the line numbers they held stay valid) and a uniform leading indent is
+ * removed. Deliberately conservative — no code is rewritten, no blank line is
+ * dropped, and string literals are never touched because only whole-line comments
+ * whose trimmed form starts with a comment marker are removed. Measured on this
+ * repo: `main.rs` 13,384 -> 11,788 tok, `index.js` 24,493 -> 20,718 tok.
+ */
+function compressRead(text) {
+  if (!text) return { text, removed: 0, dedented: 0 }
+  const lines = text.split('\n')
+  let indent = Number.POSITIVE_INFINITY
+  for (const line of lines) {
+    if (!line.trim()) continue
+    const lead = line.length - line.trimStart().length
+    if (lead < indent) indent = lead
+  }
+  const strip = Number.isFinite(indent) ? indent : 0
+  let removed = 0
+  let dedented = 0
+  const out = lines.map((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')
+      || trimmed.startsWith('#') || trimmed === '*/') {
+      removed += 1
+      return ''
+    }
+    if (strip > 0 && line.length >= strip) {
+      dedented += 1
+      return line.slice(strip)
+    }
+    return line
+  })
+  return { text: out.join('\n'), removed, dedented }
+}
+
+function compactReadValue(value) {
+  if (typeof value.content !== 'string' || !value.content) return value
+  const result = compressRead(value.content)
+  if (!result.text || result.text === value.content) return value
+  return { ...value, content: result.text, compacted: true, compactedLines: result.removed }
+}
+
+function renderRead(value) {  if (typeof value.unchangedForMs === 'number' && value.unchangedForMs > 0) {
+    return `[unchanged ${Math.round(value.unchangedForMs / 1000)}s ago · ${relPath(value.path)} · `
+      + `${value.totalLines} lines · sha ${shortHash(value.hash)} · refresh:true to reprint]`
   }
   const content = typeof value.content === 'string' ? value.content : ''
   const lineCount = content === ''
@@ -866,33 +967,35 @@ function renderRead(value) {
   // only earns the "raise limit" advice rather than a wrong next offset.
   const next = value.limited && !value.truncatedByBytes ? value.offset + lineCount : 0
   const hint = next > 0 && next <= value.totalLines
-    ? ` · next: offset=${next}${value.limit ? ` limit=${value.limit}` : ''}`
+    ? ` · next offset=${next}`
     : value.truncatedByBytes
       ? ' · cut by bytes: raise limit or lower offset'
       : ''
   const stamp = completeness({ ...value, shownLines: lineCount }, 'shownLines', 'totalLines')
-  const footer = `[${value.path} · ${scope} · ${value.totalBytes} bytes · sha256 ${value.hash}`
-    + `${stamp === 'complete' ? ' · complete' : ` · ${stamp}`}${hint}]`
+  // "complete" is the default state: saying it costs ~4 tokens on every read and
+  // carries no information. Only the exceptional case is printed.
+  const flags = `${stamp === 'complete' ? '' : ` · ${stamp}`}${value.compacted ? ' · compacted' : ''}`
+  const footer = `[${relPath(value.path)} · ${scope} · ${value.totalBytes} B · sha ${shortHash(value.hash)}${flags}${hint}]`
   return content ? `${trimTail(content)}\n${footer}` : footer
 }
 
 function renderWrite(value) {
-  return `wrote ${value.bytes} bytes to ${value.path}\nsha256 ${value.hash}`
+  return `wrote ${value.bytes} B → ${relPath(value.path)} · sha ${shortHash(value.hash)}`
 }
 
 function renderEdit(value) {
-  return `edited ${value.path}: ${value.replacements} replacement(s)\nsha256 ${value.hash}`
+  return `edited ${relPath(value.path)}: ${value.replacements} replacement(s) · sha ${shortHash(value.hash)}`
 }
 
 function renderStat(value) {
-  if (!value.exists) return `${value.path}: missing`
-  if (value.isDir) return `${value.path}: directory · mtime ${new Date(value.mtimeMs).toISOString()}`
-  return `${value.path}: file · ${value.size} bytes · mtime ${new Date(value.mtimeMs).toISOString()}`
+  if (!value.exists) return `${relPath(value.path)}: missing`
+  if (value.isDir) return `${relPath(value.path)}: directory · mtime ${new Date(value.mtimeMs).toISOString()}`
+  return `${relPath(value.path)}: file · ${value.size} B · mtime ${new Date(value.mtimeMs).toISOString()}`
 }
 
 function renderList(value) {
   const entries = Array.isArray(value.entries) ? value.entries : []
-  if (entries.length === 0) return `${value.path}: (empty)`
+  if (entries.length === 0) return `${relPath(value.path)}: (empty)`
   const lines = entries.map((entry) => (entry.isDir ? `${entry.name}/` : `${entry.name}  ${entry.size} B`))
   return lines.join('\n')
 }
@@ -906,24 +1009,24 @@ function renderSearch(value) {
   const lines = []
   for (const hit of hits) {
     const kind = hit.kind ? ` [${hit.kind}]` : ''
-    lines.push(`${hit.path}:${hit.line}${kind} ${hit.text}`)
+    lines.push(`${relPath(hit.path)}:${hit.line}${kind} ${hit.text}`)
     if (typeof hit.context === 'string' && hit.context.length > 0) {
       for (const row of hit.context.split('\n')) if (row) lines.push(`  ${row}`)
     }
   }
-  const stats = `${value.shown ?? 0}/${value.totalHits ?? 0} hits · `
-    + `${value.filesMatched ?? 0}/${value.filesScanned ?? 0} files · ${value.elapsedMs ?? 0} ms`
+  const stats = `${value.shown ?? 0}/${value.totalHits ?? 0} hits · ${value.filesMatched ?? 0} files · `
+    + `${value.elapsedMs ?? 0} ms${value.cached ? ' · cached' : ''}`
   const stamp = completeness(value, 'shown', 'totalHits')
-  lines.push(`— ${stats} · ${stamp}${value.truncated ? ' · narrow with glob/query, or raise maxHits/maxBytes' : ''}`)
+  lines.push(`— ${stats}${stamp === 'complete' ? '' : ` · ${stamp}`}`)
   return lines.join('\n')
 }
 
 function renderSymbols(value) {
   const symbols = Array.isArray(value.symbols) ? value.symbols : []
-  const lines = symbols.map((sym) => `${sym.path}:${sym.line} [${sym.kind}] ${sym.sig || sym.name}`)
+  const lines = symbols.map((sym) => `${relPath(sym.path)}:${sym.line} [${sym.kind}] ${sym.sig || sym.name}`)
   const stats = `${value.shown ?? 0}/${value.totalMatched ?? 0} symbols · ${value.elapsedMs ?? 0} ms`
   const stamp = completeness(value, 'shown', 'totalMatched')
-  lines.push(`— ${stats} · ${stamp}${value.truncated ? ' · raise limit, or filter by kind/path' : ''}`)
+  lines.push(`— ${stats}${stamp === 'complete' ? '' : ` · ${stamp}`}`)
   return lines.join('\n')
 }
 
@@ -1488,6 +1591,20 @@ function renderHealth(value) {
   return lines.join('\n')
 }
 
+/** Always published: the four workhorse tools plus the discovery entry point. */
+const RESIDENT_TOOL_NAMES = ['rust_exec', 'rust_read', 'rust_search', 'rust_health', 'native_help']
+/** Published only after `native_help` activates them (see §progressive disclosure). */
+const DORMANT_TOOL_NAMES = ['rust_write', 'rust_edit', 'rust_stat', 'rust_ls', 'rust_symbols', 'rust_session_open']
+/** One-line usage per dormant tool, printed only when it is activated. */
+const DORMANT_TOOL_HINTS = {
+  rust_write: 'path, content, expectedHash (sha prefix from rust_read, or "absent" to require a new file)',
+  rust_edit: 'path, oldString, newString, replaceAll',
+  rust_stat: 'path → exists/isDir/size/mtime',
+  rust_ls: 'path, limit → entry names, dirs, sizes',
+  rust_symbols: 'path or query, kind, limit → signatures only, no bodies',
+  rust_session_open: 'path to a session.v4.jsonl.zstd log, cursor, limit',
+}
+
 function createToolDefinitions(pool, config, store, runtime = {}) {
   /** Deadline for an fs request: the configured default. */
   const fsTimeout = () => config.defaultTimeoutMs
@@ -1496,23 +1613,16 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
     {
       name: 'rust_exec',
       description:
-        'Run a PowerShell command in the persistent Rust worker shell. The worker keeps a pool of '
-        + 'warm PowerShell lanes behind a loopback socket, so warm commands take single-digit to tens '
-        + 'of milliseconds instead of the ~3 s a fresh powershell.exe costs; prefer this over pwsh for '
-        + 'ordinary commands. Returns exitCode, stdout, and both wall and shell elapsed ms. Each call '
-        + 'leases one lane exclusively, so several calls (from this session or another one) run in '
-        + 'parallel up to the lane count; when all lanes are busy the call waits and reports queueMs. '
-        + 'The shell keeps its working directory: pass cwd to change it for this and later calls. When '
-        + 'the turn is aborted the lane is killed, and the next call on it restarts that shell only. '
-        + 'exitCode mirrors PowerShell\'s $LASTEXITCODE, so it can stay stale when a command runs no '
-        + 'native executable — trust stdout for those.',
+        'Run a PowerShell command in a persistent warm shell (fast; prefer this over pwsh). Returns '
+        + 'stdout and exitCode. cwd persists across calls; raise timeoutMs for long commands. exitCode '
+        + 'can be stale when the command ran no native executable — trust stdout for those.',
       parameters: {
         type: 'object',
         properties: {
-          command: { type: 'string', description: 'PowerShell command line to run in the warm shell.' },
-          cwd: { type: 'string', description: 'Directory to enter first; it persists for later calls.' },
-          timeoutMs: { type: 'number', description: 'Kill this lane\'s shell and report a timeout after this many milliseconds.' },
-          queueTimeoutMs: { type: 'number', description: 'Maximum time to wait for a free lane before failing (default 30000).' },
+          command: { type: 'string', description: 'PowerShell command line.' },
+          cwd: { type: 'string', description: 'Directory to enter (persists).' },
+          timeoutMs: { type: 'number', description: 'Kill after this many ms.' },
+          queueTimeoutMs: { type: 'number', description: 'Max wait for a lane (default 30000).' },
         },
         required: ['command'],
         additionalProperties: false,
@@ -1561,19 +1671,18 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
     {
       name: 'rust_read',
       description:
-        'Read a UTF-8 file through the Rust worker and return its content plus the sha256 hash used '
-        + 'by rust_write as expectedHash. offset is a 1-based first line; limit caps returned lines. '
-        + 'A truncated page ends with the next offset to ask for. Repeating an identical read of an '
-        + 'unchanged file returns "[unchanged]" instead of the body; pass refresh: true to force it. '
-        + 'Prefer over read for large files or when you need that hash; the footer shows the line '
-        + 'range, byte size, and hash.',
+        'Read a UTF-8 file through the Rust worker and return its content plus the sha256 prefix used '
+        + 'as expectedHash by rust_write. offset is a 1-based first line, limit caps returned lines, and '
+        + 'the footer carries the next offset. An identical re-read of an unchanged file returns '
+        + '[unchanged] instead of the body; pass refresh: true to force it.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'File path to read.' },
-          offset: { type: 'number', description: '1-based first line to return (default 1).' },
-          limit: { type: 'number', description: 'Maximum number of lines to return.' },
-          refresh: { type: 'boolean', description: 'Print the body even if an identical read just returned it.' },
+          path: { type: 'string', description: 'File to read.' },
+          offset: { type: 'number', description: '1-based first line (default 1).' },
+          limit: { type: 'number', description: 'Max lines.' },
+          refresh: { type: 'boolean', description: 'Reprint even if unchanged.' },
+          compact: { type: 'boolean', description: 'Strip comment-only lines (kept as blank lines, so line numbers stay valid) and remove the common indent; ~-12% tokens.' },
         },
         required: ['path'],
         additionalProperties: false,
@@ -1586,7 +1695,10 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         const params = { path: args.path }
         if (args.offset !== undefined) params.offset = args.offset
         if (args.limit !== undefined) params.limit = args.limit
-        const value = await pool.call('fs.read', params, fsTimeout(), exec?.signal, exec?.agent?.id ?? 'default')
+        const raw = await pool.call('fs.read', params, fsTimeout(), exec?.signal, exec?.agent?.id ?? 'default')
+        const value = (args.compact === true || (args.compact !== false && config.compactReads))
+          ? compactReadValue(raw)
+          : raw
         const key = readCacheKey(exec, params)
         if (args.refresh === true) {
           rememberRead(key, value.hash)
@@ -1718,23 +1830,20 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
     {
       name: 'rust_search',
       description:
-        'Search the persistent Rust code index and return ranked, budgeted snippets. Prefer this over '
-        + 'grep for code navigation: it ranks definition lines first (kind tag [fn]/[class]/…), caps '
-        + 'what it returns to maxBytes, and states how much it truncated, so one call usually answers '
-        + '"where is X" without reading whole files. glob filters paths (e.g. "*.ts"); '
-        + 'symbolsOnly=true keeps only definition lines. The index is built once per worker and '
-        + 'refreshed after this worker writes a file; refresh=true forces a re-scan.',
+        'Search the persistent code index: definition lines rank first, output is budgeted by maxBytes, '
+        + 'and the footer states what was truncated. Prefer this over grep for "where is X". glob '
+        + 'filters paths ("*.ts"), symbolsOnly keeps definition lines, regex treats query as a pattern.',
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Literal text to find (or a regex when regex=true).' },
-          glob: { type: 'string', description: 'Path filter such as "*.ts" or "src/**/*.rs" (* and ? only).' },
-          regex: { type: 'boolean', description: 'Treat query as a regular expression.' },
-          symbolsOnly: { type: 'boolean', description: 'Return only lines that define a symbol.' },
-          contextLines: { type: 'number', description: 'Context lines before/after each hit (0–2, default 1).' },
-          maxHits: { type: 'number', description: 'Maximum hits to return (default 24).' },
-          maxBytes: { type: 'number', description: 'Byte budget for the rendered payload (default 6000).' },
-          refresh: { type: 'boolean', description: 'Re-scan the tree before searching.' },
+          query: { type: 'string', description: 'Literal text (a regex when regex=true).' },
+          glob: { type: 'string', description: 'Path filter, e.g. "*.ts" or "src/**/*.rs".' },
+          regex: { type: 'boolean', description: 'Query is a regular expression.' },
+          symbolsOnly: { type: 'boolean', description: 'Definition lines only.' },
+          contextLines: { type: 'number', description: 'Context lines around a hit (0–2, default 1).' },
+          maxHits: { type: 'number', description: 'Default 24.' },
+          maxBytes: { type: 'number', description: 'Output byte budget (default 6000).' },
+          refresh: { type: 'boolean', description: 'Re-scan before searching.' },
         },
         required: ['query'],
         additionalProperties: false,
@@ -1827,10 +1936,8 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
     {
       name: 'rust_health',
       description:
-        'Report the Rust worker sidecar\'s lifecycle: pid, uptime, restart count, inbound-frame gap '
-        + 'p50/p99 (the heartbeat keeps it near 2 s), heartbeat misses, last exit code, and whether the '
-        + 'worker still sees this host alive. Use it to diagnose a wedged or restarting worker instead of '
-        + 'guessing from a slow command.',
+        'Worker health: pid, uptime, restarts, heartbeat gaps, last exit code, active tools. Use when a '
+        + 'rust_* call wedges, times out, or restarts.',
       parameters: {
         type: 'object',
         properties: {},
@@ -1846,6 +1953,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         return {
           ...health,
           routes: runtime.routes ?? null,
+          tools: runtime.activeTools ? runtime.activeTools() : null,
           metrics: metrics
             ? {
                 samples: metrics.samples,
@@ -1856,6 +1964,44 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
               }
             : null,
         }
+      },
+      isConcurrencySafe() {
+        return true
+      },
+    },
+    {
+      name: 'native_help',
+      description:
+        'Enable more rust_* tools for this session: write, edit, stat, ls, symbols, session_open. '
+        + 'Pass tools:["write"] to activate one; omit tools to list them.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tools: {
+            type: 'array',
+            description: 'Names to activate, or ["all"].',
+            items: { type: 'string' },
+          },
+        },
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object' },
+        render: (_args, value) => textOf(value.text),
+      },
+      async execute(args) {
+        const requested = Array.isArray(args?.tools) ? args.tools.map((t) => String(t).trim()) : []
+        const activated = runtime.activate?.(requested) ?? []
+        const lines = [
+          `active: ${(runtime.activeTools?.() ?? []).join(', ')}`,
+          `activatable: ${DORMANT_TOOL_NAMES.join(', ')}`,
+        ]
+        if (activated.length > 0) lines.unshift(`activated: ${activated.join(', ')}`)
+        for (const name of activated) {
+          const hint = DORMANT_TOOL_HINTS[name]
+          if (hint) lines.push(`${name} — ${hint}`)
+        }
+        return { text: lines.join('\n'), activated }
       },
       isConcurrencySafe() {
         return true
@@ -2030,7 +2176,10 @@ class MetricsStore {
     const point = { t: now, ...pickSample(raw), pool: this.pool.info() }
     this.samples += 1
     noteExtremes(this.extremes, point)
-    this.last = { ...point, raw: undefined }
+    // `point` is already the picked projection — keep no `raw` key: an explicit
+    // `raw: undefined` survives into the in-memory snapshot and makes the health
+    // tool fail DSH's lossless-JSON check even though JSON.stringify drops it.
+    this.last = { ...point }
     this.fast.push(point)
     while (this.fast.length > METRICS_FAST_POINTS) this.fast.shift()
     this.#bucket.push(point)
@@ -2081,10 +2230,50 @@ class MetricsStore {
       extremes: this.extremes,
       running: this.pool.running,
       pool: this.pool.info(),
+      workers: this.#workersPayload(),
+      cache: this.#cachePayload(),
       config: {
         lanes: this.pool.lanesPerWorker,
         maxQueueDepth: this.pool.options.maxQueueDepth,
         defaultTimeoutMs: this.settings.defaultTimeoutMs,
+      },
+    }
+  }
+
+  /**
+   * One entry per live worker, so the monitor can draw N cards without inventing
+   * data: `workersDetail` already carries per-worker identity, and the flat `last`
+   * sample is only attributable to a worker when exactly one is running.
+   */
+  #workersPayload() {
+    const detail = this.pool.info().workersDetail ?? []
+    const last = this.last ?? null
+    const single = detail.length === 1
+    const queueDepth = last?.pool?.queueDepth ?? null
+    return detail.map((worker) => ({
+      ...worker,
+      queued: worker.id === 0 ? queueDepth : null,
+      cpuPctOneCore: single ? last?.cpuPctOneCore ?? null : null,
+      workingSetBytes: single ? last?.workingSetBytes ?? null : null,
+      privateBytes: single ? last?.privateBytes ?? null : null,
+      uptimeMs: null,
+      restarts: null,
+    }))
+  }
+
+  /** Observation-cache counters plus the last sampled index size. The exact
+   *  index detail (buildMs, root, reused/parsed) comes from `/cache`, which asks
+   *  the worker directly instead of waiting for the next metrics tick. */
+  #cachePayload() {
+    const last = this.last ?? null
+    return {
+      read: readCacheSnapshot(),
+      index: {
+        files: last?.indexFiles ?? null,
+        symbols: last?.indexSymbols ?? null,
+        buildMs: null,
+        roots: null,
+        ttlMs: null,
       },
     }
   }
@@ -2237,6 +2426,44 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
     {
       path: `${METRICS_ROUTE_PREFIX}/metrics`,
       handler: (_req, res) => send(res, 200, store.snapshot()),
+    },
+    {
+      // Cache view: observation-cache counters from the already-sampled store plus
+      // a live `index.status` from the worker. Deliberately not on the metrics
+      // tick — this route is polled by the monitor dialog only while it is open.
+      path: `${METRICS_ROUTE_PREFIX}/cache`,
+      handler: async (_req, res) => {
+        try {
+          const snapshot = store.snapshot()
+          let index = null
+          try {
+            index = await pool.call('index.status', {}, 5_000, undefined, 'http')
+          } catch (error) {
+            index = null
+          }
+          send(res, 200, {
+            schema: 'dsh-rust-exec/cache@1',
+            read: snapshot.cache?.read ?? null,
+            index: index
+              ? {
+                files: index.files ?? null,
+                symbols: index.symbols ?? null,
+                buildMs: index.buildMs ?? null,
+                reusedFiles: index.reusedFiles ?? null,
+                parsedFiles: index.parsedFiles ?? null,
+                ageMs: index.ageMs ?? null,
+                ttlMs: index.ttlMs ?? null,
+                root: index.root ?? null,
+                cachePath: index.cachePath ?? null,
+                paused: index.paused ?? null,
+                roots: index.root ? 1 : null,
+              }
+              : snapshot.cache?.index ?? null,
+          })
+        } catch (error) {
+          send(res, 500, { error: error?.message ?? String(error) })
+        }
+      },
     },
     {
       path: `${METRICS_ROUTE_PREFIX}/health`,
@@ -2442,11 +2669,41 @@ export function apply(ctx, config) {
       log.error('tools.unavailable', { reason: 'ctx.tools.register is missing; no tools registered' })
       return () => {}
     }
-    const disposers = createToolDefinitions(pool, settings, store, runtime)
-      .map((definition) => ctx.tools.register(definition))
-    log.info('tools.registered', { count: disposers.length })
+    const all = createToolDefinitions(pool, settings, store, runtime)
+    const byName = new Map(all.map((definition) => [definition.name, definition]))
+    const disposers = new Map()
+    const registerTool = (name) => {
+      if (disposers.has(name)) return
+      const definition = byName.get(name)
+      if (!definition) return
+      try {
+        disposers.set(name, ctx.tools.register(definition))
+      } catch (error) {
+        log.warn('tools.register-failed', { name, error: error?.message })
+      }
+    }
+    // Progressive disclosure: four workhorse tools plus native_help cost ~500 tokens
+    // per request; publishing all ten costs 1,812. The dormant six are registered on
+    // the first native_help call that names them and stay for the session.
+    const resident = settings.progressiveDisclosure ? RESIDENT_TOOL_NAMES : all.map((item) => item.name)
+    for (const name of resident) registerTool(name)
+    runtime.activate = (requested) => {
+      const wanted = requested.includes('all') ? DORMANT_TOOL_NAMES : requested
+        .map((raw) => (String(raw).startsWith('rust_') ? String(raw) : `rust_${raw}`))
+      const activated = []
+      for (const name of wanted) {
+        if (!DORMANT_TOOL_NAMES.includes(name) || disposers.has(name)) continue
+        registerTool(name)
+        if (disposers.has(name)) activated.push(name)
+      }
+      if (activated.length > 0) log.info('tools.activated', { tools: activated })
+      return activated
+    }
+    runtime.activeTools = () => [...disposers.keys()]
+    log.info('tools.registered', { count: disposers.size, progressiveDisclosure: settings.progressiveDisclosure })
     return () => {
-      for (const dispose of disposers.reverse()) dispose()
+      for (const dispose of [...disposers.values()].reverse()) dispose()
+      disposers.clear()
     }
   }, 'rust-exec tools')
 

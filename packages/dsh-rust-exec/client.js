@@ -1,11 +1,11 @@
-// Registration id must equal package.json "name" (dsh-native). The host keys its
+// Registration id must equal package.json "name" (@keer1024/dsh-native). The host keys its
 // client-graph rows by package name and re-serves a bundle whose registration id
 // does not match the row id; that second execution throws "duplicate factory
-// registration" and fails the whole web boot (crash log: "dsh-native: import
+// registration" and fails the whole web boot (crash log: "@keer1024/dsh-native: import
 // failed"). Keep this in sync with package.json — tools/check_client_identity.mjs
 // enforces it.
 window.__ModuleLoader__.load({
-  id: 'dsh-native',
+  id: '@keer1024/dsh-native',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -155,11 +155,37 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function useMetrics(intervalMs, nonce = 0) {
-      const [state, setState] = useState({ data: null, error: null })
+    /** One JSON GET with its own abort budget; the monitor folds several of these into one tick. */
+    async function probeJson(path, timeoutMs = 8000) {
+      const controller = typeof AbortController === 'function' ? new AbortController() : null
+      const abortTimer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+      try {
+        const res = await fetch(API + path, {
+          headers: { accept: 'application/json' },
+          signal: controller ? controller.signal : undefined,
+        })
+        if (!res.ok) {
+          const failure = new Error('HTTP ' + res.status)
+          failure.status = res.status
+          throw failure
+        }
+        return await res.json()
+      } finally {
+        if (abortTimer) clearTimeout(abortTimer)
+      }
+    }
+
+    /**
+     * The dialog's only poll loop. `withMonitorFeed` rides the card rows' two extra feeds on the
+     * same timer: /sessions is a directory scan (every other tick) and /health is a local RPC, so
+     * the monitor never needs a second timer.
+     */
+    function useMetrics(intervalMs, nonce = 0, withMonitorFeed = false) {
+      const [state, setState] = useState({ data: null, error: null, sessions: null, health: null, cache: null })
       useEffect(() => {
         let disposed = false
         let timer = null
+        let ticks = 0
         const tick = async () => {
           const controller = typeof AbortController === 'function' ? new AbortController() : null
           const abortTimer = controller ? setTimeout(() => controller.abort(), 8000) : null
@@ -175,7 +201,28 @@ window.__ModuleLoader__.load({
               throw failure
             }
             const data = await res.json()
-            if (!disposed) setState({ data, error: null })
+            // Both card feeds are optional: a failed /sessions or /health never costs the
+            // metrics ring, it only leaves the previous values (or `—`) in place.
+            let feed = null
+            if (withMonitorFeed && ticks % 2 === 0) {
+              feed = await Promise.all([
+                probeJson('/sessions').catch(() => null),
+                probeJson('/health').catch(() => null),
+                // The cache view asks the worker for `index.status`, so it rides a
+                // slower cadence than the counters it sits next to.
+                ticks % 4 === 0 ? probeJson('/cache').catch(() => null) : Promise.resolve(null),
+              ])
+            }
+            ticks += 1
+            if (!disposed) {
+              setState((prev) => ({
+                data,
+                error: null,
+                sessions: feed?.[0]?.sessions ?? prev.sessions,
+                health: feed?.[1] ?? prev.health,
+                cache: feed?.[2] ?? prev.cache,
+              }))
+            }
           } catch (error) {
             // A 404 means the route was never mounted in this host boot: that is a
             // plugin/host seam problem, not a transient one. Say so, and stop
@@ -184,6 +231,7 @@ window.__ModuleLoader__.load({
               retryMs = 30000
               if (!disposed) {
                 setState((prev) => ({
+                  ...prev,
                   data: prev.data,
                   error: pick(
                     'HTTP 404 · 指标路由未注册（重载插件后刷新页面）；30 秒后重试',
@@ -192,7 +240,7 @@ window.__ModuleLoader__.load({
                 }))
               }
             } else if (!disposed) {
-              setState((prev) => ({ data: prev.data, error: error.message || String(error) }))
+              setState((prev) => ({ ...prev, data: prev.data, error: error.message || String(error) }))
             }
           } finally {
             if (abortTimer) clearTimeout(abortTimer)
@@ -201,7 +249,7 @@ window.__ModuleLoader__.load({
         }
         tick()
         return () => { disposed = true; if (timer) clearTimeout(timer) }
-      }, [intervalMs, nonce])
+      }, [intervalMs, nonce, withMonitorFeed])
       return state
     }
 
@@ -1028,6 +1076,126 @@ window.__ModuleLoader__.load({
     const fmtInt = (value) => String(Math.round(Number(value) || 0))
     const fmtPct = (value) => (Number(value) || 0).toFixed(1) + '%'
 
+    // ---- Phase-4 card rows, pinned to the top of the monitor dialog. Hard layout contract
+    // (grep targets: flex-wrap:nowrap, clamp(240px,22vw,320px)):
+    //   row  = display:flex; flex-wrap:nowrap; overflow-x:auto    (CARD_ROW_STYLE)
+    //   card = flex:0 0 auto; width:clamp(240px,22vw,320px)       (CARD_STYLE)
+    // Rows never wrap and cards never shrink to fit. When cards fall off the right edge the row
+    // draws a fade over that edge and its heading shows a `+N` chip counting the hidden cards.
+    const CARD_WIDTH = 'clamp(240px,22vw,320px)'
+    const CARD_STYLE = {
+      boxSizing: 'border-box', flex: '0 0 auto', width: CARD_WIDTH, minWidth: 0,
+      display: 'flex', flexDirection: 'column', gap: 4,
+      background: MONITOR_COLORS.panel, border: '1px solid ' + MONITOR_COLORS.border,
+      borderRadius: 6, padding: '10px 12px', color: MONITOR_COLORS.text,
+    }
+    const CARD_ROW_STYLE = {
+      display: 'flex', flexWrap: 'nowrap', alignItems: 'stretch', gap: 8,
+      overflowX: 'auto', overflowY: 'hidden', paddingBottom: 4,
+    }
+
+    /** Small label/value stack used by all three card kinds; rows are `[label, value]` pairs. */
+    function InfoCard({ title, subtitle, rows, accent }) {
+      const list = Array.isArray(rows) ? rows : []
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 } },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 } },
+          h('strong', {
+            style: {
+              fontSize: 12, color: accent || MONITOR_COLORS.text, minWidth: 0,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            },
+          }, title),
+          subtitle
+            ? h('span', { style: { fontSize: 10, color: MONITOR_COLORS.muted, whiteSpace: 'nowrap' } }, subtitle)
+            : null,
+        ),
+        list.map((row, index) => h('div', {
+          key: index,
+          style: { display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11, lineHeight: '15px', minWidth: 0 },
+        },
+          h('span', { style: { flex: '0 0 auto', color: MONITOR_COLORS.muted } }, row[0]),
+          h('span', {
+            style: {
+              flex: '1 1 0', minWidth: 0, textAlign: 'right', fontVariantNumeric: 'tabular-nums',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            },
+          }, String(row[1])),
+        )),
+      )
+    }
+
+    function MutedCard({ text }) {
+      return h('div', {
+        style: {
+          ...CARD_STYLE, width: '100%', flex: '1 1 auto', alignItems: 'center', justifyContent: 'center',
+          minHeight: 62, color: MONITOR_COLORS.muted, fontSize: 11.5,
+        },
+      }, text)
+    }
+
+    /**
+     * One never-wrapping row of fixed-width cards. `items` is `[{ key, node }]`; an empty list
+     * renders the single muted placeholder instead of an empty strip.
+     */
+    function CardRow({ title, items, empty }) {
+      const scrollerRef = useRef(null)
+      const [hidden, setHidden] = useState(0)
+      const cards = Array.isArray(items) ? items : []
+      const measure = () => {
+        const node = scrollerRef.current
+        if (!node) return
+        if (cards.length === 0) { setHidden(0); return }
+        const edge = node.scrollLeft + node.clientWidth
+        let clipped = 0
+        for (let index = 0; index < node.children.length; index += 1) {
+          const child = node.children[index]
+          if (child.offsetLeft + child.offsetWidth > edge + 1) clipped += 1
+        }
+        setHidden((prev) => (prev === clipped ? prev : clipped))
+      }
+      useEffect(() => {
+        measure()
+        if (typeof window === 'undefined') return undefined
+        window.addEventListener('resize', measure)
+        return () => window.removeEventListener('resize', measure)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [cards.length, title])
+      return h('section', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+          h('strong', { style: { fontSize: 12.5, color: MONITOR_COLORS.text } }, title),
+          h('span', { style: { fontSize: 10.5, color: MONITOR_COLORS.muted } }, String(cards.length)),
+          hidden > 0
+            ? h('span', {
+              title: pick(hidden + ' 张卡片在右侧', hidden + ' more card(s) to the right'),
+              style: {
+                marginLeft: 'auto', fontSize: 10.5, color: MONITOR_COLORS.orange,
+                border: '1px solid ' + MONITOR_COLORS.border, borderRadius: 9,
+                padding: '0 6px', lineHeight: '15px',
+              },
+            }, '+' + hidden)
+            : null,
+        ),
+        h('div', { style: { position: 'relative', minWidth: 0 } },
+          h('div', { ref: scrollerRef, style: CARD_ROW_STYLE, onScroll: measure },
+            cards.length > 0
+              ? cards.map((card, index) => h('div', {
+                key: card.key == null ? index : card.key,
+                style: CARD_STYLE,
+              }, card.node))
+              : h(MutedCard, { text: empty || '—' }),
+          ),
+          hidden > 0
+            ? h('div', {
+              style: {
+                position: 'absolute', top: 0, right: 0, bottom: 4, width: 48, pointerEvents: 'none',
+                background: 'linear-gradient(to right, rgba(17,18,23,0), ' + MONITOR_COLORS.bg + ')',
+              },
+            })
+            : null,
+        ),
+      )
+    }
+
     function MonitorCard({ label, value, min, max, series, color, ratio, ratioMax }) {
       const values = Array.isArray(series) && series.length ? series : [0]
       const ceiling = Math.max(1, ...values.map((entry) => Number(entry) || 0))
@@ -1099,8 +1267,200 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ---- Card sources for the three top rows. Builders only read published payload shapes and
+    // fall back to '—', so a field the host has not shipped yet costs a dash, never a crash.
+    // Host contract still owed (see Phase-4 report):
+    //   GET /metrics -> optional `workers: [{id, pid, running, inflight, lanes, queued,
+    //                   cpuPctOneCore, workingSetBytes, privateBytes, uptimeMs, restarts,
+    //                   lastUsedAt}]`  (today only `pool.workersDetail` exists, and the flat
+    //                   sample describes the primary worker alone)
+    //   GET /metrics -> optional `cache: { read: { entries, hits, misses, bytes, ttlMs },
+    //                                   index: { roots, files, symbols } }`
+    const DASH = '—'
+    /** Number or the em dash: the single degradation rule every card field follows. */
+    const numOrDash = (value, format = fmtInt) => (value == null || !Number.isFinite(Number(value)) ? DASH : format(Number(value)))
+
+    /** Row 1: one card per live worker. With N > 1 workers the per-worker cpu/memory sample is
+     * genuinely unknown, so only pid/lanes/inflight come from `/metrics` and the rest is `—`. */
+    function workerCards(data, health) {
+      const pool = data?.pool ?? {}
+      const detail = Array.isArray(pool.workersDetail) ? pool.workersDetail : []
+      const list = Array.isArray(data?.workers) && data.workers.length ? data.workers : detail
+      // No list at all and no live pool: let the row render its muted placeholder instead.
+      const workers = list.length ? list : (Number(pool.workers) > 0 || data?.last ? [{}] : [])
+      const single = workers.length === 1
+      const sample = single ? (data?.last ?? null) : null
+      const probe = (health && health.worker) || {}
+      const restartsOf = (worker, index) => {
+        if (typeof worker.restarts === 'number') return String(worker.restarts)
+        return index === 0 && typeof health?.restarts === 'number' ? String(health.restarts) : DASH
+      }
+      const uptimeOf = (worker, index) => {
+        const value = Number(worker.uptimeMs ?? (index === 0 ? probe.uptimeMs : null))
+        return Number.isFinite(value) && value > 0 ? fmtDuration(value) : DASH
+      }
+      const pidOf = (worker, index) => {
+        const value = Number(worker.pid ?? (index === 0 ? probe.pid : null))
+        return Number.isFinite(value) && value > 0 ? String(value) : DASH
+      }
+      const beatOf = (index) => {
+        if (index !== 0) return DASH
+        const value = Number(probe.lastHostSeenMsAgo)
+        return Number.isFinite(value) && value >= 0 ? fmtDuration(value) + ' ago' : DASH
+      }
+      return workers.map((entry, index) => {
+        const worker = entry || {}
+        const inflight = Number(worker.inflight ?? sample?.inflight ?? NaN)
+        const queued = Number(worker.queued ?? sample?.queued ?? pool.queueDepth ?? NaN)
+        const running = worker.running === false ? false : true
+        const workingSet = sample?.workingSetBytes ?? worker.workingSetBytes
+        const rows = [
+          ['pid', pidOf(worker, index)],
+          [pick('运行', 'uptime'), uptimeOf(worker, index)],
+          [pick('CPU 单核', 'cpu one core'), sample ? fmtPct(sample.cpuPctOneCore) : DASH],
+          ['working set', workingSet == null || !Number.isFinite(Number(workingSet)) ? DASH : fmtBytes(workingSet)],
+          ['inflight/queued', (Number.isFinite(inflight) ? inflight : DASH) + '/' + (Number.isFinite(queued) ? queued : DASH)],
+          [pick('重启', 'restarts'), restartsOf(worker, index)],
+          [pick('心跳', 'heartbeat'), beatOf(index)],
+        ]
+        return {
+          key: 'worker-' + (worker.id ?? index),
+          node: h(InfoCard, {
+            title: pick('Worker ', 'Worker ') + (worker.id ?? index),
+            subtitle: running ? (sample ? '' : pick('无采样', 'no sample')) : pick('空闲', 'idle'),
+            accent: running ? MONITOR_COLORS.green : MONITOR_COLORS.red,
+            rows,
+          }),
+        }
+      })
+    }
+
+    /** Row 2: one card per active session, newest first (that is the order `/sessions` returns).
+     * Detail is honest about being unavailable: without a projection the cache cell stays `—`. */
+    function sessionCards(list, details, pool) {
+      const rows = Array.isArray(list) ? list : []
+      const live = new Map()
+      ;(Array.isArray(pool?.sessions) ? pool.sessions : []).forEach((entry) => {
+        if (entry && entry.sessionId) live.set(String(entry.sessionId), entry)
+      })
+      return rows.map((entry, index) => {
+        const id = String(entry?.id ?? '')
+        const short = id.replace(/^session-/, '').slice(0, 8) || pick('会话 ', 'session ') + index
+        const detail = details ? details[id] : null
+        const counts = detail?.counts ?? null
+        const inflight = live.get(id)
+        const active = Number.isFinite(Number(entry?.mtimeMs)) ? ago(Number(entry.mtimeMs)) : DASH
+        const cache = detail?.loading
+          ? pick('读取中…', 'loading…')
+          : detail && detail.nextCursor != null
+            ? pick('已投影 ', 'projected ') + String(detail.nextCursor)
+            : DASH
+        return {
+          key: 'session-' + (id || index),
+          node: h(InfoCard, {
+            title: short,
+            subtitle: detail?.timings?.mode ? String(detail.timings.mode) : undefined,
+            rows: [
+              [pick('日志', 'bytes'), Number.isFinite(Number(entry?.size)) ? fmtBytes(Number(entry.size)) : DASH],
+              [pick('记录', 'records'), counts && Number.isFinite(counts.records) ? fmtInt(counts.records) : numOrDash(detail?.total)],
+              [pick('步骤/轮次', 'steps/turns'), counts ? fmtInt(counts.steps) + '/' + fmtInt(counts.turns) : DASH],
+              [pick('活动', 'active'), active],
+              ['inflight', inflight ? String(inflight.inflight ?? 0) : DASH],
+              [pick('投影', 'cache'), cache],
+            ],
+          }),
+        }
+      })
+    }
+
+    /** Row 3: exactly one card. Both caches are optional in `/metrics`; index counts fall back to
+     * the sample the host already publishes, everything else stays `—` until it ships. */
+    function cacheCard(data, live) {
+      const cache = live ?? data?.cache ?? null
+      const read = cache?.read ?? null
+      const index = cache?.index ?? null
+      const last = data?.last ?? null
+      const num = numOrDash
+      const roots = index && Array.isArray(index.roots) ? index.roots.filter(Boolean).map(String) : []
+      const rootText = roots.length
+        ? roots.join(', ')
+        : index && typeof index.root === 'string' && index.root
+          ? index.root
+          : index && typeof index.roots === 'string' && index.roots ? index.roots : DASH
+      return {
+        key: 'cache',
+        node: h(InfoCard, {
+          title: pick('缓存', 'cache'),
+          subtitle: 'ttl ' + num(read?.ttlMs, fmtDuration) + ' · build ' + num(index?.buildMs, fmtDuration),
+          rows: [
+            [pick('读条目', 'read entries'), num(read?.entries, fmtInt)],
+            [pick('读字节', 'read bytes'), num(read?.bytes, fmtBytes)],
+            [pick('命中/未命中', 'hits/misses'), num(read?.hits, fmtInt) + ' / ' + num(read?.misses, fmtInt)],
+            [pick('索引根', 'index roots'), rootText],
+            [pick('文件/符号', 'files/symbols'), num(index?.files ?? last?.indexFiles, fmtInt) + ' / ' + num(index?.symbols ?? last?.indexSymbols, fmtInt)],
+            [pick('复用/重解析', 'reused/parsed'), num(index?.reusedFiles, fmtInt) + ' / ' + num(index?.parsedFiles, fmtInt)],
+          ],
+        }),
+      }
+    }
+
+    /**
+     * `/session` detail for the newest few sessions only, refetched when that log's size/mtime
+     * changes. A cold projection decodes the whole log, so the page size is 1 and the request is
+     * deduped per `id:size:mtimeMs`; the host's warm cache makes the repeat cheap.
+     */
+    function useSessionDetails(list, limit = 3) {
+      const [details, setDetails] = useState({})
+      const seen = useRef({})
+      const wanted = (Array.isArray(list) ? list : [])
+        .filter((entry) => entry && entry.id)
+        .slice(0, limit)
+        .map((entry) => ({ id: String(entry.id), sig: String(entry.size ?? '') + ':' + String(entry.mtimeMs ?? '') }))
+      const wantedKey = wanted.map((entry) => entry.id + '@' + entry.sig).join(',')
+      useEffect(() => {
+        let disposed = false
+        wanted.forEach((entry) => {
+          const previous = seen.current[entry.id]
+          if (previous === entry.sig) return
+          // Only a log whose size/mtime moved triggers a request; the host's warm cache turns
+          // the repeat into an append-sized decode instead of a full projection.
+          seen.current[entry.id] = entry.sig
+          setDetails((prev) => ({ ...prev, [entry.id]: { ...(prev[entry.id] || {}), loading: true } }))
+          probeJson('/session?id=' + encodeURIComponent(entry.id) + '&limit=1')
+            .then((detail) => {
+              if (disposed) return
+              setDetails((prev) => ({ ...prev, [entry.id]: { loading: false, ...detail } }))
+            })
+            .catch((error) => {
+              if (disposed) return
+              setDetails((prev) => ({ ...prev, [entry.id]: { loading: false, error: error.message || String(error) } }))
+            })
+        })
+        return () => { disposed = true }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [wantedKey, limit])
+      return details
+    }
+
+    /** The three Phase-4 rows as one block, so MonitorDialog itself stays a layout function. */
+    function MonitorCardRows({ data, sessionLogs, sessionDetails, health, cache }) {
+      return h(React.Fragment, null,
+        h(CardRow, {
+          title: 'Workers',
+          items: workerCards(data, health),
+          empty: pick('没有活跃 worker', 'no active worker'),
+        }),
+        h(CardRow, {
+          title: 'Sessions',
+          items: sessionCards(sessionLogs, sessionDetails, data?.pool),
+          empty: pick('没有活跃会话', 'no active session'),
+        }),
+        h(CardRow, { title: 'Cache', items: [cacheCard(data, cache)] }),
+      )
+    }
+
     function MonitorDialog({ onClose }) {
-      const { data, error } = useMetrics(POLL_MS)
+      const { data, error, sessions: sessionLogs, health, cache } = useMetrics(POLL_MS, 0, true)
       const fast = useMemo(() => {
         const list = data?.history?.fast
         return Array.isArray(list) ? list.slice(-SPARK) : []
@@ -1121,6 +1481,9 @@ window.__ModuleLoader__.load({
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
       }, [onClose])
+
+      // Projection detail for the newest sessions; same poll loop, no extra timer.
+      const sessionDetails = useSessionDetails(sessionLogs)
 
       const card = (key, label, format, color, ratioMax) => {
         const ext = extreme(key)
@@ -1175,6 +1538,9 @@ window.__ModuleLoader__.load({
           ),
           error ? h('div', { style: { fontSize: 12, color: MONITOR_COLORS.red } }, 'metrics unavailable: ' + error) : null,
           !data ? h('div', { style: { fontSize: 12, color: MONITOR_COLORS.muted } }, pick('读取中…', 'loading…')) : null,
+          // Phase-4 rows, pinned above the legacy tiles. One row per class, never wraps; a row
+          // that overflows fades its right edge and reports the hidden count as `+N`.
+          data ? h(MonitorCardRows, { data, sessionLogs, sessionDetails, health, cache }) : null,
           data ? h('div', {
             style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 8 },
           },
@@ -1194,7 +1560,7 @@ window.__ModuleLoader__.load({
             h('span', null, pick('软限动作 ', 'soft action ') + String(pool.softLimits?.lastAction ?? 'none')),
           ) : null,
           h(MonitorTable, {
-            title: pick('Workers', 'Workers'),
+            title: pick('Workers (lanes)', 'Workers (lanes)'),
             count: workers.length,
             headers: ['#', 'pid', pick('运行中', 'running'), 'lanes', pick('状态', 'state')],
             rows: workers.map((worker) => [
@@ -1236,25 +1602,30 @@ window.__ModuleLoader__.load({
         fontVariantNumeric: 'tabular-nums', fontFeatureSettings: '"tnum"',
       })
       const items = [
-        ['CPU', Math.round(last.cpuPctOneCore || 0) + '%', '4ch'],
-        ['RSS', rss + ' MB', '7ch'],
-        [pick('运行中', 'running'), String(last.inflight || 0), '2ch'],
-        [pick('队列', 'queue'), String(last.queued || 0), '2ch'],
+        ['CPU:', Math.round(last.cpuPctOneCore || 0) + '%', '4ch'],
+        ['RSS:', rss + 'M', '5ch'],
+        [pick('运行中:', 'running:'), String(last.inflight || 0), '2ch'],
+        [pick('队列:', 'queue:'), String(last.queued || 0), '2ch'],
       ]
+      const nodes = []
+      items.forEach(([label, value, width], index) => {
+        if (index > 0) nodes.push(h('span', { key: 'sep-' + index, style: { opacity: 0.45 } }, ' - '))
+        nodes.push(h('span', { key: label, style: itemStyle },
+          h('span', null, label),
+          h('span', { 'data-dsh-rust-metric': index, style: valueStyle(width) }, value),
+        ))
+      })
       return h('div', {
         title: pick('R-Native · dsh-native 实时资源', 'R-Native · dsh-native live resources'),
         style: {
-          display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center',
+          display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center',
           fontSize: 11, opacity: 0.62, padding: '2px 4px 4px', fontVariantNumeric: 'tabular-nums',
           userSelect: 'none', flexWrap: 'wrap',
         },
       },
         h('span', { style: { width: 6, height: 6, borderRadius: 99, background: (last.cpuPctOneCore || 0) > 50 ? COLORS.warn : COLORS.ok, display: 'inline-block' } }),
-        h('span', null, 'R-Native'),
-        ...items.map(([label, value, width], index) => h('span', { key: label, style: itemStyle },
-          h('span', null, label),
-          h('span', { 'data-dsh-rust-metric': index, style: valueStyle(width) }, value),
-        )),
+        h('span', { style: { marginRight: 2 } }, 'R-Native'),
+        ...nodes,
       )
     }
 

@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.2-2f6fed?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.1-2f6fed?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
@@ -28,7 +28,7 @@
 
 对外是 **10 个工具 + 7 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.4.2**（2026-10-22）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+> 当前版本 **1.5.1**（2026-10-23）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`，1.5.0 起以 scope 发布为 `@keer1024/dsh-native`（界面显示名仍是 `dsh-native`）；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
 
 ---
 
@@ -75,11 +75,11 @@
 
 ```powershell
 # 1) 装进 DSH profile
-pnpm add dsh-native          # 或 npm i dsh-native
+pnpm add @keer1024/dsh-native     # 或 npm i @keer1024/dsh-native
 
 # 2) 挂载 bundle —— 编辑 <DSH_HOME>\profiles\<profile>\package.json
 #    "dsh": { "profile": { "bundles": [
-#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-native" ] } }
+#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@keer1024/dsh-native" ] } }
 
 # 3) 重启 DSH，然后验收
 curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
@@ -91,7 +91,7 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 ### 3.2 从 tarball 安装（离线 / 内网）
 
 ```powershell
-npm i E:\path\dsh-native-1.4.2.tgz
+npm i E:\path\keer1024-dsh-native-1.5.1.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -106,7 +106,7 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路�
 
 ### 3.4 升级与卸载
 
-- **升级**：`pnpm add dsh-native@latest` → 重启 DSH。exe 被占用时先 `Move-Item` 改名为 `.old`
+- **升级**：`pnpm add @keer1024/dsh-native@latest` → 重启 DSH。exe 被占用时先 `Move-Item` 改名为 `.old`
   （Windows 允许重命名运行中的镜像），复制新 exe，再删 `.old`。
 - **卸载**：在 DSH 插件管理里移除，或从 `dsh.profile.bundles` 删掉该条目 → 重启 DSH；
   投影缓存可以整体删除，不残留状态。
@@ -262,12 +262,17 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 
 ### 9.3 状态条（`conversation.composer.dock`）
 
-标签 **`R-Native`**，后面依次 CPU → 内存 → 运行中 → 队列；`title` 为
-`R-Native · dsh-native 实时资源`。采样失败时保留上一次值，不闪 `NaN`。
+标签 **`R-Native`**，指标用 `标签: 数值` 加 ` - ` 分隔：
+
+```
+● R-Native  CPU:  0%  -  RSS: 26M  -  运行中: 1  -  队列: 0
+```
+
+`title` 为 `R-Native · dsh-native 实时资源`。采样失败时保留上一次值，不闪 `NaN`。
 
 数值用等宽数字（`tabular-nums` / `"tnum"`）并各自占一个**固定 `ch` 宽度的右对齐槽位**
-（CPU `4ch`、RSS `7ch`、运行中 `2ch`、队列 `2ch`）。只开等宽数字不够：`0% → 100%`、`9 MB →
-1024 MB` 会改变字符串长度，居中的整行就会被推着左右跳；定宽槽位让数值变化时状态条纹丝不动。
+（CPU `4ch`、RSS `5ch`、运行中 `2ch`、队列 `2ch`）。只开等宽数字不够：`0% → 100%`、`9M →
+1024M` 会改变字符串长度，居中的整行就会被推着左右跳；定宽槽位让数值变化时状态条纹丝不动。
 
 
 ## 10. 性能（本机实测）
@@ -292,7 +297,7 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | 重启后报 `web boot: 1 entry did not activate` / `duplicate factory registration` | `package.json` 的 `name` 与 `client.js` 注册 id、`cordis.patch.yml` 不一致 | `node tools\check_client_identity.mjs` 定位；三处必须同名 |
-| 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `dsh-native`（只写 `dependencies` 不够） | 补 bundles + `pnpm install` + 重启 |
+| 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `@keer1024/dsh-native`（只写 `dependencies` 不够） | 补 bundles + `pnpm install` + 重启 |
 | 面板 401 / 404 | 浏览器没带凭据，或路由没挂上 | 看 `/health` 的 `routes.registered`；404 会退避重挂 |
 | 工具报 `拒绝访问 (os error 5)` 写 `%TEMP%` / `~/.dsh` | worker 是低完整性进程（从工作区启动的镜像带 Low IL 标签） | 预期限制：只能写工作区；锁文件与缓存由宿主代写 |
 | 首次 `exec` 3–20 s | PowerShell 进程冷启动 | 正常；已在启动期预热 |
@@ -334,8 +339,8 @@ reap 7/7、sweep 3/3，渲染与路由脚本全绿。
 - **Node**：host 插件只用 `node:` 内置模块，≥22 即可。
 - **只读投影**：真相源仍是 DSH 会话日志，插件不写回；投影可丢弃可重建。
 - **低完整性**：从工作区启动的镜像只能写工作区（见排障表）。
-- **未发布**：`package.json` 目前 `private: true`，通过 tarball / 目录 link 分发；npm 裸名
-  `dsh-native` 可用（2026-10-22 复核）。
+- **分发状态**：包名 `@keer1024/dsh-native`，npm 上尚未上架（已登录 `keer1024`，发布卡在 2FA）；
+  当前通过 tarball / 目录 link 分发，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
 
 
 ## 14. 目录结构
@@ -375,7 +380,7 @@ dist/                        打包产物（tarball + sha256）
 - **10 tools** — `rust_exec`, `rust_read`, `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_search`, `rust_symbols`, `rust_session_open`, `rust_health`
 - **7 routes** — `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config}`
 - **UI** — pinned-header projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor (lifecycle min/max + sparkline), `R-Native` resource strip
-- **Install** — `pnpm add dsh-native`, add `dsh-native` to `dsh.profile.bundles`, restart DSH
+- **Install** — `pnpm add @keer1024/dsh-native`, add `@keer1024/dsh-native` to `dsh.profile.bundles`, restart DSH
 - **Requires** — Windows 10/11 x64 · DSH desktop · PowerShell 5.1 (no Node.js on the target machine)
 
 See the Chinese sections above for the full manual, or read [CHANGELOG.md](packages/dsh-rust-exec/CHANGELOG.md).

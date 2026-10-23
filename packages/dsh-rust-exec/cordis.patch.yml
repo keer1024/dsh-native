@@ -1,4 +1,4 @@
 - insert:
-    - id: dsh-native
-      name: 'dsh-native'
+    - id: '@keer1024/dsh-native'
+      name: '@keer1024/dsh-native'
       config: {}

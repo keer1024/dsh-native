@@ -40,6 +40,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_MAX_READ_BYTES: usize = 1 << 20; // 1 MiB
+/// Cap on `exec` stdout. A bare `cat` of a large file otherwise floods the model's
+/// context in one call; the payload says how much was cut so the model can narrow.
+const DEFAULT_EXEC_MAX_BYTES: usize = 24_000;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 300_000;
 const SHELL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -628,9 +631,20 @@ fn fs_write(params: &Value) -> Result<Value, String> {
         .map(|s| s.to_string());
 
     if let Some(expected) = expected {
+        let expected = expected.trim().to_ascii_lowercase();
         let current = fs::read(&path).ok().map(|b| sha256_hex(&b));
         let current = current.unwrap_or_else(|| "absent".to_string());
-        if current != expected {
+        // The read footer shows a 16-hex prefix to save ~26 tokens per file, so a
+        // prefix is accepted as the guard. A prefix still pins the exact content:
+        // any byte change lands in the hash and stops matching it.
+        let matches = if expected == "absent" {
+            current == "absent"
+        } else if expected.len() < 64 && expected.len() >= 8 {
+            current.starts_with(&expected)
+        } else {
+            current == expected
+        };
+        if !matches {
             return Err(format!(
                 "version guard failed for {}: expected {expected}, actual {current}",
                 path.display()
@@ -1168,9 +1182,20 @@ fn exec(params: &Value, pool: &Arc<LanePool>) -> Result<Value, String> {
     match outcome {
         Ok(outcome) => {
             lane.record(elapsed_ms, true);
+            let max_bytes = opt_num(params, "maxBytes").unwrap_or(DEFAULT_EXEC_MAX_BYTES as u64) as usize;
+            let total_bytes = outcome.stdout.len();
+            let (stdout, truncated) = if total_bytes > max_bytes {
+                let cut = floor_char_boundary(&outcome.stdout, max_bytes);
+                (outcome.stdout[..cut].to_string(), true)
+            } else {
+                (outcome.stdout, false)
+            };
             Ok(json!({
                 "exitCode": outcome.exit_code,
-                "stdout": outcome.stdout,
+                "stdout": stdout,
+                "truncated": truncated,
+                "shownBytes": if truncated { max_bytes } else { total_bytes },
+                "totalBytes": total_bytes,
                 "ms": elapsed_ms,
                 "shellMs": outcome.shell_ms,
                 "reused": outcome.reused,

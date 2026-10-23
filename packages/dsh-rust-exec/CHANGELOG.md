@@ -2,6 +2,72 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.5.1 — 2026-10-23
+
+### Changed — the status strip reads as `label: value - label: value`
+- The composer strip is now `● R-Native  CPU: 0%  -  RSS: 26M  -  运行中: 1  -  队列: 0`: every
+  metric gets a `label:` prefix and the four are separated by a muted ` - `.
+- RSS switches from `MB` to `M` (`16 MB` → `16M`) and its fixed slot narrows to `5ch`, so the
+  line is shorter without losing the no-jump guarantee earned in 1.4.2.
+
+### Fixed — scoped package name finished in all three identity places
+- `package.json` and `cordis.patch.yml` already said `@keer1024/dsh-native`, but `client.js` still
+  registered `dsh-native` and the profile still listed the unscoped bundle. That is exactly the
+  mismatch that fails web boot with `duplicate factory registration`, so the client id, the patch
+  id and the profile dependency/bundle are now all `@keer1024/dsh-native`.
+  `tools/check_client_identity.mjs` is back to 20/20.
+
+## 1.5.0 — 2026-10-22
+
+Token and latency pass: the model-facing surface got ~62% smaller, oversized outputs are now
+bounded at the source, and the code index survives a worker restart.
+
+### Added
+- `native_help` — the one discovery tool. The six rarely-used tools (`rust_write`, `rust_edit`,
+  `rust_stat`, `rust_ls`, `rust_symbols`, `rust_session_open`) are no longer resident: they are
+  registered on demand by `native_help({ tools: ["write"] })` (or `["all"]`), which also lists
+  what is still activatable. Resident set is now `rust_exec`, `rust_read`, `rust_search`,
+  `rust_health`, `native_help` = **719 tok** of schema per request, down from 1,812 for all ten;
+  set `progressiveDisclosure: false` for the old always-on behaviour.
+- `rust_read({ compact: true })` — comment-only lines become blank lines (line numbers stay
+  valid) and the common indent is removed before the page is rendered. Measured with the real
+  renderer: −32.6% on a 200-line Rust page, −25.0% at 400 lines, −8…−23% on JS, −12.6%/−18.3%
+  for whole-file reads. Opt in per call or globally with `compactReads: true`.
+- Disk-persisted code index (`DSH_RUST_INDEX_CACHE_DIR`, else `%LOCALAPPDATA%\dsh-native\index`),
+  keyed by scope root and invalidated per file by `size`/`mtime`; parsing runs on up to 8 threads.
+  Same workspace (1,278 files / 6,770 symbols): cold build 313 → **171 ms**, warm start
+  313 → **92 ms**, `index.drop` → rebuild from cache 72–94 ms.
+- `GET /api/dsh-rust-exec/cache` — one payload for both cache layers (`read`: entries/bytes/
+  hits/misses/ttl; `index`: files/symbols/buildMs/reusedFiles/parsedFiles/cachePath/roots).
+  `/metrics` now also carries `workers[]` and `cache`, so the new monitor cards need no second
+  fetch.
+- Monitor cards: one non-wrapping row each for workers (one card per worker), live sessions (one
+  card per session, newest three expanded), and cache; overflowing rows fade their right edge and
+  report the hidden count as `+N`.
+
+### Changed
+- Read/search/stat/list footers and hit lines use **workspace-relative paths**, and hashes are
+  printed as a 16-hex prefix that `rust_write`/`rust_edit` accept as `expectedHash`. A 64-hex
+  digest cost 36 tok per occurrence and an absolute path 31 tok versus 5 relative.
+- An unchanged re-read now renders one line (`[unchanged 12s ago · path · 1513 lines · sha …]`,
+  36 tok instead of 71), and the happy-path `complete=true` marker is gone from every footer.
+- Tool descriptions and parameter docs were rewritten to be terse (`rust_exec` 180 → 54 tok,
+  `rust_search` 110 → 57, `rust_health` 68 → 36).
+- `rust_exec` output is capped at 24,000 B by default (`maxBytes` overrides) and now reports
+  `truncated` / `shownBytes` / `totalBytes` instead of streaming gigabytes into the transcript.
+
+### Fixed
+- `rust_health` could fail with `value is not lossless JSON`: the metrics snapshot stored
+  `last.raw = undefined`, which JSON.stringify drops but DSH's lossless encoder rejects. The
+  snapshot no longer carries that key.
+- `rust_write`/`rust_edit` accept the 16-hex `sha` prefix printed by `rust_read` as
+  `expectedHash`; previously only a full 64-hex digest or `"absent"` passed the version guard.
+
+### Packaging
+- Renamed to **`@keer1024/dsh-native`** (GitHub Packages requires the scope to match the owner)
+  and published there via `.github/workflows/publish.yml`; the scope mapping lives in `.npmrc`.
+  Existing installs must update `dsh.profile.bundles` to `@keer1024/dsh-native`.
+
 ## 1.4.2 — 2026-10-22
 
 ### Changed — kind filter is a dropdown, metric slots no longer jump

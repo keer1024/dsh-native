@@ -144,9 +144,9 @@ await render(byId('dsh-native-strip').Component)
 console.log('  text:', text().slice(0, 160))
 check('strip label is R-Native', /^R-Native(CPU|CPU |$)/.test(text()), text().slice(0, 40))
 check('strip hint renames R-Native', /R-Native · dsh-native/.test(rootEl.querySelector('[title]')?.getAttribute('title') || ''))
-check('strip shows CPU percentage', /CPU\s*12%/.test(text()), text().slice(0, 80))
-check('strip shows RSS in MB', /RSS\s*16 MB/.test(text()))
-check('strip shows queue and inflight', /(队列|queue) ?2/.test(text()) && /(运行中|running) ?2/.test(text()), text().slice(0, 120))
+check('strip shows CPU percentage', /CPU:\s*12%/.test(text()), text().slice(0, 80))
+check('strip shows RSS in M', /RSS:\s*16M/.test(text()))
+check('strip shows queue and inflight', /(队列|queue):\s*2/.test(text()) && /(运行中|running):\s*2/.test(text()), text().slice(0, 120))
 {
   const stripText = text()
   const at = (re) => stripText.search(re)
@@ -154,10 +154,11 @@ check('strip shows queue and inflight', /(队列|queue) ?2/.test(text()) && /(�
     at(/CPU/) < at(/RSS/) && at(/RSS/) < at(/(运行中|running)/) && at(/(运行中|running)/) < at(/(队列|queue)/),
     stripText.slice(0, 120))
 }
+check('strip separates metrics with dashes', (text().match(/ - /g) || []).length === 3, text().slice(0, 120))
 check('strip values use fixed-width right-aligned slots', (() => {
   const nodes = [...rootEl.querySelectorAll('[data-dsh-rust-metric]')]
   const slots = nodes.map((node) => node.style.minWidth + '/' + node.style.textAlign).join(',')
-  return nodes.length === 4 && slots === '4ch/right,7ch/right,2ch/right,2ch/right'
+  return nodes.length === 4 && slots === '4ch/right,5ch/right,2ch/right,2ch/right'
     && nodes.every((node) => node.style.fontVariantNumeric === 'tabular-nums')
 })(), [...rootEl.querySelectorAll('[data-dsh-rust-metric]')].map((node) => node.style.minWidth + '/' + node.style.textAlign).join(','))
 {

@@ -9,3 +9,6 @@ node_modules/
 .idea/
 .vscode/
 
+
+# local worker backups (large binaries, never part of the package)
+packages/dsh-rust-exec/bin/dsh-rust-worker-*.exe

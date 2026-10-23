@@ -1,0 +1,50 @@
+name: publish
+
+# Publishes @keer1024/dsh-native to GitHub Packages. GitHub Packages only accepts
+# scoped names whose scope equals the repository owner, and it never lets a version
+# be overwritten — so bump `version` in package.json, tag it, and let this run.
+#
+# Prerequisite: this directory is the root of github.com/keer1024/dsh-native and the
+# bundled bin/dsh-rust-worker.exe is committed (the workflow does not build Rust).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@keer1024'
+
+      - name: Tag must match package version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          node --check index.js
+          node --check client.js
+
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

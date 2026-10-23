@@ -18,11 +18,17 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const MAX_FILE_BYTES: u64 = 1_500_000;
 const MAX_SNIPPET_CHARS: usize = 240;
 const MAX_CONTEXT_LINES: usize = 2;
-const DEFAULT_TTL_MS: u64 = 10_000;
+const DEFAULT_TTL_MS: u64 = 30_000;
+/// Bumped whenever the on-disk shape of a cached entry changes.
+const CACHE_VERSION: u32 = 1;
+/// Below this many files a cold build is already cheap; threads would only add noise.
+const PARALLEL_MIN_FILES: usize = 32;
+const MAX_PARSE_THREADS: usize = 8;
 
 /// Text files we index and search. Anything else (binaries, images, locks) is skipped.
 const TEXT_EXTS: &[&str] = &[
@@ -65,6 +71,10 @@ struct Index {
     symbols: usize,
     built_at_ms: u64,
     build_ms: u64,
+    /// Files whose cached metadata matched the walk (no content read).
+    reused: usize,
+    /// Files actually read and parsed in this build.
+    parsed: usize,
 }
 
 struct State {
@@ -88,6 +98,125 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// on-disk index cache
+// ---------------------------------------------------------------------------
+//
+// A cold build re-reads every indexed file; on Windows that first read is the
+// expensive part (AV filter drivers, cold page cache), not the regex work — the
+// measured 1,274-file workspace took ~83 s. The cache stores metadata + symbols
+// per file and reuses an entry whenever the walk still reports the same size and
+// mtime, so a worker restart costs one walk (~0.3 s) instead of a full re-read.
+//
+// Cache location: `DSH_RUST_INDEX_CACHE_DIR`, else `%LOCALAPPDATA%\dsh-native\index`,
+// else the temp dir. One file per root, keyed by a hash of the canonical root path.
+
+fn cache_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("DSH_RUST_INDEX_CACHE_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if !local.trim().is_empty() {
+            return PathBuf::from(local).join("dsh-native").join("index");
+        }
+    }
+    std::env::temp_dir().join("dsh-native-index")
+}
+
+/// Paths are compared case-insensitively on Windows, so the key is folded too.
+fn root_key(root: &Path) -> String {
+    root.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
+}
+
+fn cache_path(root: &Path) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(root_key(root).as_bytes());
+    let digest = hasher.finalize();
+    let mut name = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    cache_dir().join(format!("{name}-v{CACHE_VERSION}.json"))
+}
+
+fn entry_to_json(entry: &Entry) -> Value {
+    json!({
+        "path": &entry.path,
+        "size": entry.size,
+        "mtimeMs": entry.mtime_ms,
+        "lines": entry.lines,
+        "syms": entry.syms.iter().map(|s| json!([s.line, s.kind, &s.name, &s.sig])).collect::<Vec<_>>(),
+    })
+}
+
+fn entry_from_json(value: &Value) -> Option<Entry> {
+    let path = value.get("path")?.as_str()?.to_string();
+    let size = value.get("size")?.as_u64()?;
+    let mtime_ms = value.get("mtimeMs")?.as_u64()?;
+    let lines = value.get("lines").and_then(Value::as_u64).unwrap_or(1) as u32;
+    let mut syms: Vec<Sym> = Vec::new();
+    if let Some(items) = value.get("syms").and_then(Value::as_array) {
+        for item in items {
+            let Some(parts) = item.as_array() else { continue };
+            if parts.len() < 4 {
+                continue;
+            }
+            syms.push(Sym {
+                line: parts[0].as_u64().unwrap_or(0) as u32,
+                kind: parts[1].as_u64().unwrap_or(0) as u8,
+                name: parts[2].as_str().unwrap_or("").to_string(),
+                sig: parts[3].as_str().unwrap_or("").to_string(),
+            });
+        }
+    }
+    Some(Entry { path, size, mtime_ms, lines, syms })
+}
+
+fn load_cache(root: &Path) -> HashMap<String, Entry> {
+    let mut out: HashMap<String, Entry> = HashMap::new();
+    let Ok(bytes) = fs::read(cache_path(root)) else { return out };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { return out };
+    if value.get("version").and_then(Value::as_u64) != Some(CACHE_VERSION as u64) {
+        return out;
+    }
+    let cached_root = value.get("root").and_then(Value::as_str).unwrap_or("");
+    if !cached_root.eq_ignore_ascii_case(&root_key(root)) {
+        return out;
+    }
+    let Some(files) = value.get("files").and_then(Value::as_array) else { return out };
+    for file in files {
+        if let Some(entry) = entry_from_json(file) {
+            out.insert(entry.path.clone(), entry);
+        }
+    }
+    out
+}
+
+fn save_cache(root: &Path, files: &[Entry]) {
+    if files.is_empty() {
+        return;
+    }
+    let dir = cache_dir();
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = json!({
+        "version": CACHE_VERSION,
+        "root": root_key(root),
+        "savedAtMs": now_ms(),
+        "files": files.iter().map(entry_to_json).collect::<Vec<Value>>(),
+    });
+    let Ok(bytes) = serde_json::to_vec(&body) else { return };
+    let path = cache_path(root);
+    let tmp = path.with_extension("tmp");
+    // Write-then-rename so a crashed save never leaves a half-parsed cache.
+    if fs::write(&tmp, &bytes).is_ok() {
+        let _ = fs::rename(&tmp, &path);
+    }
 }
 
 fn resolve_root() -> PathBuf {
@@ -276,22 +405,75 @@ fn walk(root: &Path) -> Vec<(PathBuf, u64, u64)> {
     out
 }
 
-fn build(root: &Path) -> Index {
-    let started = Instant::now();
-    let mut files: Vec<Entry> = Vec::new();
-    for (path, size, mtime) in walk(root) {
-        if let Some(entry) = read_entry(root, &path, size, mtime) {
-            files.push(entry);
+/// Parse the files that the cache could not answer for, in parallel when there
+/// are enough of them. Pure CPU + `fs::read`, so threads scale cleanly; the
+/// join order of the results does not matter because `build` sorts afterwards.
+fn parse_files(root: &Path, todo: Vec<(PathBuf, u64, u64)>) -> Vec<Entry> {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_PARSE_THREADS);
+    if workers == 1 || todo.len() < PARALLEL_MIN_FILES {
+        return todo
+            .into_iter()
+            .filter_map(|(path, size, mtime)| read_entry(root, &path, size, mtime))
+            .collect();
+    }
+    let chunk = todo.len().div_ceil(workers);
+    let mut handles = Vec::with_capacity(workers);
+    let mut rest = todo;
+    while !rest.is_empty() {
+        let take = rest.len().min(chunk);
+        let batch: Vec<(PathBuf, u64, u64)> = rest.drain(..take).collect();
+        let root = root.to_path_buf();
+        handles.push(std::thread::spawn(move || -> Vec<Entry> {
+            batch
+                .into_iter()
+                .filter_map(|(path, size, mtime)| read_entry(&root, &path, size, mtime))
+                .collect()
+        }));
+    }
+    let mut out: Vec<Entry> = Vec::new();
+    for handle in handles {
+        if let Ok(entries) = handle.join() {
+            out.extend(entries);
         }
     }
+    out
+}
+
+fn build(root: &Path) -> Index {
+    let started = Instant::now();
+    let walked = walk(root);
+    let mut cached = load_cache(root);
+    let mut files: Vec<Entry> = Vec::with_capacity(walked.len());
+    let mut todo: Vec<(PathBuf, u64, u64)> = Vec::new();
+    for (path, size, mtime) in walked {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        match cached.remove(&rel) {
+            Some(entry) if entry.size == size && entry.mtime_ms == mtime => files.push(entry),
+            _ => todo.push((path, size, mtime)),
+        }
+    }
+    let reused = files.len();
+    let parsed_entries = parse_files(root, todo);
+    let parsed = parsed_entries.len();
+    files.extend(parsed_entries);
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let symbols = files.iter().map(|f| f.syms.len()).sum();
+    save_cache(root, &files);
     Index {
         root: root.to_path_buf(),
         files,
         symbols,
         built_at_ms: now_ms(),
         build_ms: started.elapsed().as_millis() as u64,
+        reused,
+        parsed,
     }
 }
 
@@ -306,6 +488,7 @@ impl Index {
             .map(|entry| (entry.path.clone(), entry))
             .collect();
         let mut files: Vec<Entry> = Vec::new();
+        let mut todo: Vec<(PathBuf, u64, u64)> = Vec::new();
         for (path, size, mtime) in walk(&root) {
             let rel = path
                 .strip_prefix(&root)
@@ -314,21 +497,24 @@ impl Index {
                 .replace('\\', "/");
             match existing.remove(&rel) {
                 Some(entry) if entry.size == size && entry.mtime_ms == mtime => files.push(entry),
-                _ => {
-                    if let Some(entry) = read_entry(&root, &path, size, mtime) {
-                        files.push(entry);
-                    }
-                }
+                _ => todo.push((path, size, mtime)),
             }
         }
+        let reused = files.len();
+        let parsed_entries = parse_files(&root, todo);
+        let parsed = parsed_entries.len();
+        files.extend(parsed_entries);
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let symbols = files.iter().map(|f| f.syms.len()).sum();
+        save_cache(&root, &files);
         Index {
             root,
             files,
             symbols,
             built_at_ms: now_ms(),
             build_ms: started.elapsed().as_millis() as u64,
+            reused,
+            parsed,
         }
     }
 }
@@ -361,6 +547,7 @@ pub fn note_change(path: &str) {
         }
     }
     index.symbols = index.files.iter().map(|f| f.syms.len()).sum();
+    save_cache(&root, &index.files);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +723,9 @@ pub fn status_value() -> Value {
         "ageMs": now_ms().saturating_sub(index.built_at_ms),
         "ttlMs": DEFAULT_TTL_MS,
         "paused": is_paused(),
+        "reusedFiles": index.reused,
+        "parsedFiles": index.parsed,
+        "cachePath": cache_path(&index.root).to_string_lossy(),
     })
 }
 
@@ -554,6 +744,9 @@ pub fn status(params: &Value) -> Result<Value, String> {
         "ageMs": now_ms().saturating_sub(index.built_at_ms),
         "ttlMs": DEFAULT_TTL_MS,
         "paused": is_paused(),
+        "reusedFiles": index.reused,
+        "parsedFiles": index.parsed,
+        "cachePath": cache_path(&index.root).to_string_lossy(),
     }))
 }
 

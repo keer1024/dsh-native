@@ -10,11 +10,18 @@ only adds display.
 ## Install
 
 ```bash
-# 1) install the package into your DSH profile
-pnpm add dsh-native            # or: npm i dsh-native
+# 1) point the @keer1024 scope at GitHub Packages (public packages still need a token
+#    with read:packages). Put these two lines in ~/.npmrc or in
+#    <DSH_HOME>/profiles/<profile>/.npmrc:
+#      @keer1024:registry=https://npm.pkg.github.com
+#      //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 
-# 2) mount the bundle — the package ships cordis.patch.yml
-#    add "dsh-native" to dsh.profile.bundles in <DSH_HOME>/profiles/<profile>/package.json
+# 2) install the package into your DSH profile
+pnpm add @keer1024/dsh-native        # or: npm i @keer1024/dsh-native
+
+# 3) mount the bundle — the package ships cordis.patch.yml
+#    add "@keer1024/dsh-native" to dsh.profile.bundles in
+#    <DSH_HOME>/profiles/<profile>/package.json
 ```
 
 Restart DSH, then check:
@@ -23,16 +30,16 @@ Restart DSH, then check:
 curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 ```
 
-A healthy answer contains `ok: true`, the worker pid and the mounted route count (7).
+A healthy answer contains `ok: true`, the worker pid and the mounted route count (8).
 
 ## What you get
 
 | | |
 |---|---|
-| Tools | `rust_exec`, `rust_read`, `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_search`, `rust_symbols`, `rust_session_open`, `rust_health` |
-| Routes | `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config}` |
-| UI | pinned-header session projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor (lifecycle min/max + sparkline), `R-Native` resource strip |
-| Worker | warm PowerShell lanes (default 4, max 16), session affinity, soft RSS/CPU limits, watchdog against host exit |
+| Tools | resident: `rust_exec`, `rust_read`, `rust_search`, `rust_health`, `native_help`; activated on demand: `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_symbols`, `rust_session_open` |
+| Routes | `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config,cache}` |
+| UI | pinned-header session projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor with one card row each for workers, sessions and cache, `R-Native` resource strip |
+| Worker | warm PowerShell lanes (default 4, max 16), session affinity, soft RSS/CPU limits, watchdog against host exit, disk-persisted code index (parallel parse) |
 
 ## Requirements
 

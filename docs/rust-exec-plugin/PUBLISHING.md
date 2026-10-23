@@ -9,9 +9,9 @@
 
 | 项 | 结论 |
 |---|---|
-| npm 上的 `dsh-native` | **未被占用**（`npm view dsh-native` → 404，2026-10-22）；直接以裸名发布可行 |
-| 历史名称 `dsh-flash` | 已被第三方占用（`1.1.0`，「Quick Control panel core for DSH Workbench」），所以 1.4.0 起改名为 `dsh-native` |
-| 备选名 | `dsh-native-plugin`、`@你的scope/dsh-native` 均可用（scope 更适合后续多包） |
+| npm 包名 | **`@keer1024/dsh-native`**（1.5.0 起启用 scope；裸名 `dsh-native` 当时未被占用，保留给未来公共分发） |
+| 历史名称 | `dsh-flash` 已被第三方占用（`1.1.0`）→ 1.4.0 改名 `dsh-native` → 1.5.0 加 scope |
+| 发布账号 | `npm whoami` → `keer1024`；**发布要求 2FA**：`npm publish --otp <6 位>`，或用勾选 Bypass 2FA 的 Granular Access Token |
 | 市场目录仓库 | [`awesome-dsh-plugin/awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)，数据在 `data/plugins/`，一个插件一个 YAML |
 | 安装前提 | `package.json` 必须声明 `dsh.bundle.patch`（我们已有 `./cordis.patch.yml`），否则市场判为不可安装 |
 | 提交粒度 | 一个 PR 最多 3 条；更新自己的条目只改自己那一个文件；README 由脚本生成，不要手改 |
@@ -19,10 +19,10 @@
 
 **包名决策**
 
-1. 默认走裸名 `dsh-native`（当前可用）。
-2. 若日后要和其它 `dsh-native-*` 插件区分，改用 scope，如 `@你的scope/dsh-native`；改包名时
-   `package.json` 的 `name`、`cordis.patch.yml` 的 `name`/`id`、`client.js` 的注册 id 三处必须一起改
-   （`tools/check_client_identity.mjs` 会把不一致直接判红）。
+1. 当前发布名为 `@keer1024/dsh-native`，命令固定带 `--access public`（scoped 包不带会按私有包收费失败）。
+2. 若要换 scope 或回到裸名，三处必须一起改：`package.json` 的 `name`、`cordis.patch.yml` 的 `name`/`id`、
+   `client.js` 的注册 id；`tools/check_client_identity.mjs` 会把不一致直接判红 —— 半途改名会导致重启
+   `duplicate factory registration`（1.2.1 与 1.5.1 各踩过一次）。
 3. 不发布 npm 也能上架：把 `npm pack` 产物挂到 GitHub Release，市场条目用 `tarball:` 指向它。
 
 市场条目里的 `name:` 用的是仓库（如 `keer/dsh-native`），与 npm 包名无关，所以改名不影响上架。
@@ -42,20 +42,19 @@ node ..\..\tools\pool_test.mjs                      # 10 项治理
 npm pack --dry-run                                  # 看清单与体积（不应包含 .old / .tmp / target）
 ```
 
-`package.json` 需要补齐（当前仍是 `private: true`、无 license/repository）：
+`package.json` 的这些字段已在 1.5.1 补齐（发布前只需核对，不必重写）：
 
 ```jsonc
 {
-  "private": false,
-  "license": "MIT",                                  // 或你选定的许可证，仓库里要有对应 LICENSE 文件
-  "repository": { "type": "git", "url": "https://github.com/<owner>/<repo>.git", "directory": "packages/dsh-rust-exec" },
-  "homepage": "https://github.com/<owner>/<repo>#readme",
-  "bugs": "https://github.com/<owner>/<repo>/issues",
-  "engines": { "node": ">=22" },
-  "files": [
-    "index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg",
-    "bin/dsh-rust-worker.exe", "README.md", "CHANGELOG.md"
-  ]
+  "name": "@keer1024/dsh-native",
+  "version": "1.5.1",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/keer1024/dsh-native.git" },
+  "homepage": "https://github.com/keer1024/dsh-native#readme",
+  "bugs": { "url": "https://github.com/keer1024/dsh-native/issues" },
+  "engines": { "node": ">=20" },
+  "os": ["win32"], "cpu": ["x64"],
+  "publishConfig": { "registry": "https://registry.npmjs.org", "access": "public" }
 }
 ```
 
@@ -67,10 +66,12 @@ npm pack --dry-run                                  # 看清单与体积（不�
 
 ```powershell
 cd packages\dsh-rust-exec
-# 先改 name 为选定的包名，再跑一次 check_client_identity
-npm login
-npm publish --access public        # scope 包需要 --access public
+npm whoami --registry=https://registry.npmjs.org      # 期望 keer1024
+npm publish --access public --otp <6 位验证码>          # 2FA 账号必须带 OTP，或改用 Bypass-2FA 的 Granular Token
 ```
+
+- `~/.npmrc` 的 registry 可能指向 `registry.npmmirror.com`（只读镜像）；`publishConfig` 已把发布源固定到官方源，**不要**用 `--registry` 覆盖成镜像。
+- 2FA 只接受 6 位 TOTP；恢复码（recovery codes）与 `--otp` 不通用，只能在网页端重新绑定验证器或生成 Granular Token。
 
 发布后立刻验证安装链路（干净 profile）：
 
@@ -78,7 +79,7 @@ npm publish --access public        # scope 包需要 --access public
 $env:DSH_PROFILE='pubtest'   # 或在插件管理里新建测试 profile
 dsh plugin add <包名>        # 等价于插件市场的安装动作
 # 重启 DSH → 新会话里应能看到 10 个 rust_* 工具
-# 浏览器刷新一次 → 设置页出现 dsh-native 标签页 + 资源监控按钮
+# 浏览器刷新一次 → 设置页出现 dsh-native 标签页 + 「监控器」按钮
 dsh plugin remove <包名>     # 再装回，确认可卸载、可重装
 ```
 
@@ -93,8 +94,8 @@ category: tools
 description:
   en: 'dsh-native: a resident Rust worker handles command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; the host stays a thin JSON-RPC, lane-scheduling, 7-route layer. The UI adds a pinned-header projection view with fuzzy filtering and a fixed 420 px detail pane, a Grafana-style monitor with lifetime min/max and sparklines, and the R-Native resource strip.'
   zh: 'dsh-native：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 7 条 HTTP 路由。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器（生命周期 min/max + sparkline）和 R-Native 资源状态条。'
-npm: <包名>              # 发了 npm 才写；否则删掉这行
-# tarball: https://github.com/<owner>/<repo>/releases/download/v1.4.2/dsh-native-1.4.2.tgz
+npm: @keer1024/dsh-native   # 发了 npm 才写；否则删掉这行
+# tarball: https://github.com/keer1024/dsh-native/releases/download/v1.5.1/keer1024-dsh-native-1.5.1.tgz
 screenshots:
   - docs/rust-exec-plugin/assets/settings-tab.png
 ```
