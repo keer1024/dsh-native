@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.1-2f6fed?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-1.6.1-2f6fed?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
@@ -26,9 +26,11 @@
 
 把 DSH 里「真正动手」的那部分交给一个**常驻的 Rust worker**：命令执行、带 sha256 校验的文件读写、代码索引与检索、会话日志投影、资源采样都在 Rust 侧完成；DSH 宿主只做 JSON-RPC 管道、lane 调度与路由注册，浏览器侧只做**叠加式**展示。
 
-对外是 **10 个工具 + 7 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
+对外是 **10 个工具 + 8 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.5.1**（2026-10-23）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`，1.5.0 起以 scope 发布为 `@keer1024/dsh-native`（界面显示名仍是 `dsh-native`）；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+> 当前版本 **1.6.1**（2026-10-23）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`，1.5.0 起以 scope 发布为 `@keer1024/dsh-native`（界面显示名仍是 `dsh-native`）；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+>
+> 1.6.1 同时带来：worker 镜像搬到 `%LOCALAPPDATA%\dsh-native\bin`（摆脱 DSH 沙箱给工作区 exe 打的 Low IL 标签）、异步启动（DSH 先开，worker 延迟 1.2 s 拉起，`readiness` 状态机就绪后前端自动刷新）、监控器三行卡片重设计，以及本轮的**全量中文注释**与 `tools/build_plugin.mjs` 构建脚本（产物落根目录 `bin/`）。
 
 ---
 
@@ -64,7 +66,7 @@
 <p align="center">
   <img src="image/monitor.png" alt="dsh-native 监控页：Grafana 风格监控器" width="880">
   <br>
-  <sub><b>③ 监控页</b> — 生命周期 min/max 数字卡片、零依赖 sparkline、worker 表与活动会话表</sub>
+  <sub><b>③ 监控页</b> — 三行卡片（Workers / Sessions / Cache）+ 跟随选中 worker 切换的曲线组 + 零依赖 sparkline</sub>
 </p>
 
 ---
@@ -85,13 +87,19 @@ pnpm add @keer1024/dsh-native     # 或 npm i @keer1024/dsh-native
 curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 ```
 
-返回里能看到 `ok: true`、worker pid 和 `routes: 7`，就说明装好了；随后设置页 → 插件 → `dsh-native`
+返回里能看到 `ok: true`、worker pid 和 `routes: 8`，就说明装好了；随后设置页 → 插件 → `dsh-native`
 会出现「监控器」按钮，对话页顶部会多出「R-Native 视图」页签。
 
 ### 3.2 从 tarball 安装（离线 / 内网）
 
+仓库根目录的 `bin/` 里始终放着一份**最新**安装包（随仓库提交，带 `.sha256`）：
+
 ```powershell
-npm i E:\path\keer1024-dsh-native-1.5.1.tgz
+# 先校验（可选但推荐）
+Get-FileHash .\bin\keer1024-dsh-native-1.6.1.tgz -Algorithm SHA256
+# 与 bin\keer1024-dsh-native-1.6.1.tgz.sha256 里的摘要比对
+
+npm i .\bin\keer1024-dsh-native-1.6.1.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -101,7 +109,7 @@ npm i E:\path\keer1024-dsh-native-1.5.1.tgz
 
 ```powershell
 node tools\check_client_identity.mjs      # 包名 / client 注册 id / patch 名 / files[] 一致性
-$env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路由与工具清单
+$env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 8 条路由与工具清单
 ```
 
 ### 3.4 升级与卸载
@@ -113,13 +121,41 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路�
 
 装好后 host 侧（工具、路由）热生效；客户端叠加物需要**刷新一次页面**。
 
+### 3.5 构建与打包（维护者）
+
+一条命令完成「编译 → 换装 → 打包 → 归档」：
+
+```powershell
+node tools\build_plugin.mjs                 # 全量：cargo 编译 + 换装 + npm pack + 分发
+node tools\build_plugin.mjs --skip-rust     # 跳过 cargo 与换装，用现有二进制直接打包
+node tools\build_plugin.mjs --no-archive    # 只更新 bin/，不往 dist/ 归档
+```
+
+| 阶段 | 做什么 | 失败时 |
+|---|---|---|
+| 1. 编译 | `cargo build --release --locked`（`packages/dsh-rust-worker/sources`） | 直接抛错中断，绝不把旧二进制当成新版本 |
+| 2. 换装 | 新二进制 → `packages/dsh-rust-exec/bin/dsh-rust-worker.exe`；内容相同则跳过，不同则先把旧文件改名成 `dsh-rust-worker-<版本>[-N].exe` 备份（Windows 允许重命名运行中的 exe，但不允许覆盖） | 找不到编译产物时报错并提示改用 `--skip-rust` |
+| 3. 打包 | 在 `packages/dsh-rust-exec` 里 `npm pack --ignore-scripts` | 校验产物文件名里的版本号 |
+| 4. 分发 | 根目录 `bin/`（**只留最新一份**，随仓库提交）+ `dist/`（按版本归档，已在 `.gitignore` 里），两边都写 `<hash>␠␠<文件名>` 格式的 `.sha256` | — |
+| 5. 摘要 | 打印版本、安装包路径、大小、sha256、包内文件数 | — |
+
+约定：
+
+- **版本号唯一事实源**是 `packages/dsh-rust-exec/package.json` 的 `version`，脚本不另存一份；发版前自己 bump 版本并提交。
+- 脚本**不碰 git**：不自动 commit、不自动打 tag，只在最后打印摘要。
+- 幂等：重复执行不会产生重复备份，也不会覆盖哈希不同的历史备份；`bin/` 里的旧包会被清掉，因为「项目根目录下的安装包永远是最新的」。
+- Windows 上链接器会因为 `%LOCALAPPDATA%\Temp` 的 ACL 报 `Cannot create temporary file ...: Permission denied`，脚本已把 `TMP`/`TEMP` 重定向到 `.tmp/build`（已忽略），无需手动设置。
+- 产物 `bin/keer1024-dsh-native-<版本>.tgz` 就是 §3.2 里离线安装用的那个文件。
+
 ---
 
 ## 4. 设计原则
 
 
-- **常驻而非按需**：worker 在 `apply()` 时就预热（`pool.start()`），冷启动成本落在 DSH 启动期，
-  不落在第一次工具调用上。
+- **异步启动而非阻塞启动**：`apply()` 只挂一个延迟任务（默认 1.2 s，见 `deferStart` / `startDelayMs`），
+  DSH 先把窗口开起来；worker 拉起后 `readiness` 依次走 `pending → starting → ready`，前端在就绪那一刻
+  自动补齐 `/metrics`、`/sessions`、`/cache`，不做整页刷新。索引冷建由宿主在 ready 之后用
+  `index.status{refresh:true}` 触发，既不挡启动、也不挡第一次工具调用（`prewarmIndex:false` 可关掉预热）。
 - **旁路只读**：会话投影只读 DSH 的 append-only 日志，不接管写路径；停用插件即回到原路径，
   投影缓存可整体删除。
 - **叠加不接管**：客户端只往 `settings.plugins.tab` / `conversation.view` /
@@ -150,7 +186,7 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路�
 | 组件 | 路径 | 说明 |
 |---|---|---|
 | Rust worker | [`packages/dsh-rust-worker`](packages/dsh-rust-worker) | 常驻进程；预编译产物随包发布为 `bin/dsh-rust-worker.exe`（≈2.25 MB） |
-| DSH host 插件 | [`packages/dsh-rust-exec`](packages/dsh-rust-exec) | 10 个工具 + 7 条路由 + `Config` 校验 + 设置页标签页 |
+| DSH host 插件 | [`packages/dsh-rust-exec`](packages/dsh-rust-exec) | 10 个工具 + 8 条路由 + `Config` 校验 + 设置页标签页 |
 | 浏览器侧叠加物 | [`packages/dsh-rust-exec/client.js`](packages/dsh-rust-exec/client.js) | 设置页与监控器、会话投影视图、`R-Native` 状态条 |
 | 生命周期契约 | `index.js` ↔ `main.rs` | 协议版本 1；`hello` 不匹配 exit(2)；宿主看护失败 exit(3) |
 
@@ -180,7 +216,7 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路�
 完整结果显示 `complete`，便于模型判断要不要续读。
 
 
-## 7. HTTP 路由（7 条）
+## 7. HTTP 路由（8 条）
 
 
 前缀 `/api/dsh-rust-exec`，挂载失败会退避重试（不会「一次失败永久放弃」），挂载结果见
@@ -188,7 +224,8 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 7 条路�
 
 | 路由 | 返回 |
 |---|---|
-| `GET /metrics` | 最近采样（1 s 一点，保留 300 点 + 60 个 1 分钟桶）、`pool`（workers/队列/运行中）、`sessions`、`config`，以及 `extremes`：本宿主进程生命周期内的 min/max/last |
+| `GET /metrics` | 最近采样（1 s 一点，保留 300 点 + 60 个 1 分钟桶）、`pool`（workers/队列/运行中）、`sessions`、`config`、`readiness`（`pending/starting/ready/failed` 与耗时、worker pid、索引预热结果）、`workers[]`（每 worker 的 pid/uptime/队列与 per-worker 曲线环）、`cache`（读缓存条目/命中/未命中/字节 + 索引文件与符号数），以及 `extremes`：本宿主进程生命周期内的 min/max/last |
+| `GET /cache` | 缓存视图（`schema: dsh-rust-exec/cache@1`）：`read`（宿主读缓存：entries/limit/ttlMs/bytes/hits/misses）+ `index`（worker 索引：files/symbols/buildMs/reusedFiles/parsedFiles/ageMs/ttlMs/root/cachePath/paused） |
 | `GET /health` | `hostPid`、worker pid/版本/协议、重启次数、`routes.registered`、锁文件路径 |
 | `GET /events` | 近期事件环形缓冲（重启、软限、路由重挂等） |
 | `GET /sessions` | 可投影的会话列表（≤50，按 mtime 倒序） |
@@ -219,10 +256,16 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 | `idleReapMs` | ≥10000，默认 300000 | 空闲回收 |
 | `rssSoftLimitMb` | 64–65536，默认 512 | 软限：超限先丢索引，不杀进程 |
 | `cpuSoftLimitPct` | 10–100，默认 70 | 持续超限时暂停派发 |
+| `deferStart` | 布尔，默认 `true` | 异步启动：挂载后不立刻拉起 worker，而是等 `startDelayMs`；`false` 回退为同步启动（旧行为） |
+| `startDelayMs` | 0–30000，默认 1200 | 延迟启动的等待时长；工具先被调用时会立刻结束等待 |
+| `prewarmIndex` | 布尔，默认 `true` | 是否让 worker 在启动时预热索引与 PowerShell lane（以 `DSH_RUST_PREWARM=0/1` 传入）；`false` 时全部留给首次调用 |
+| `progressiveDisclosure` | 布尔，默认 `true` | 只常驻 `rust_exec` / `rust_read` / `rust_search` / `rust_health` / `native_help`，其余 6 个按需激活；`false` 恢复 10 个全常驻 |
+| `compactReads` | 布尔，默认 `false` | `rust_read` 默认压缩（去注释行、折叠公共缩进，行号仍然有效）；单次调用可用 `compact` 覆盖 |
 
 环境变量：`DSH_HOME`（锁文件与缓存的根，默认 `%USERPROFILE%\.dsh`）、`DSH_PROFILE`
 （锁文件名后缀，默认 `default`）、`DSH_RUST_WORKER_CWD`（worker 的 cwd）、`DSH_RUST_DEBUG`
-（协议调试日志）、`DSH_VERSION`（上报用）。测试脚本另认 `DSH_RUST_WORKER` 指定 exe 路径。
+（协议调试日志）、`DSH_RUST_PREWARM`（`0` 关闭 worker 启动预热，等价于 `prewarmIndex:false`）、
+`DSH_VERSION`（上报用）。测试脚本另认 `DSH_RUST_WORKER` 指定 exe 路径。
 
 锁文件：`<DSH_HOME>/run/dsh-rust-worker-<profile>.lock`，内容两行 `pid` + 宿主实例 UUID。
 **由宿主写**（低完整性 worker 写不了），回收前会核对进程镜像名，绝不按 pid 盲杀。
@@ -247,14 +290,14 @@ worker 镜像、完整性判定和日志路径。
 
 顶部只有两个按钮：**刷新**（重新拉一次 `/metrics`）与 **监控器**。
 
-**监控器**（Grafana 风格浮层，`Esc` 或点遮罩关闭）：
+**监控器**（Grafana 风格浮层，`Esc` 或点遮罩关闭）：自上而下**三行卡片**，每行横向不换行，超出部分横向滚动、右缘渐隐并给 `+N` 提示；卡片是紧凑两列网格（标签在上、值在下，值带 `title` 可看全文）。
 
-- 8 张数字卡片：CPU 单核占用、工作集、私有字节、句柄、队列深度、运行中、索引文件数、索引符号数。
-- 每张卡：当前值大字 + 本宿主进程生命周期内的 **min / max** + 120 点零依赖 SVG sparkline，
-  有软限的指标再加一条用量条。
-- 下方 Workers 表（pid、inflight/lanes、retiring、状态点）与活动会话表
-  （sessionId、inflight、calls、lastCallMs、最近活动）。
-- `extremes` 由宿主在内存里累计：**DSH 重启清零，刷新页面不丢**。
+- **Workers 行**：每个 worker 一张卡（pid / uptime / inflight·lanes / 队列 / 重启次数），可点选；标题圆点跟随 `readiness.phase` 变色（就绪绿、未运行红、启动中橙）。
+- **曲线组**：紧贴在 Workers 行下方，8 张 sparkline 卡（CPU 单核、工作集、私有字节、句柄、队列深度、运行中、索引文件数、索引符号数），数据取 `/metrics.workers[i].history`；多 worker 时随选中的卡片切换，标题带 `worker #id · pid …`。
+- **Sessions 行**：每个会话一张卡（inflight、calls、最近调用 ms、最近活动），右上角圆点表示是否正在通信（`inflight > 0` 绿、空闲灰，圆点带 `aria-label`/`title`，不单靠颜色）；`/sessions` 为空时回退用 `/metrics.pool.sessions`。
+- **Cache 行**：单张卡，上半是宿主读缓存（entries/limit、hits/misses、字节、TTL），下半是 worker 索引（files/symbols、buildMs、reused/parsed），数据来自 `/cache`。
+- `readiness` 没到 `ready` 时，Workers/Sessions 行显示「启动中…」，曲线区显示「等待采样…」；一旦就绪，前端立刻补拉 `/metrics`、`/sessions`、`/cache`，不需要手动刷新。
+- `extremes` 与曲线环都由宿主在内存里累计：**DSH 重启清零，刷新页面不丢**。
 
 ### 9.2 会话投影视图（`conversation.view`）
 
@@ -299,8 +342,10 @@ worker 镜像、完整性判定和日志路径。
 | worker 握手 | ~11 ms | hello + initialize |
 
 注意：**新建** PowerShell 进程在本机要 3–20 s（Defender + 模块首次加载，低完整性进程更慢）。
-插件在 `apply()` 预热，所以这笔钱通常已经付在 DSH 启动期；若你看到「第一次 `rust_exec` 很慢、
-之后很快」，那不是回归。
+1.6.1 起这笔钱落在「延迟启动」的后台窗口里（默认挂载后 1.2 s 拉起 worker，`readiness` 就绪即报），
+不再挡 DSH 开窗；若你看到「第一次 `rust_exec` 很慢、之后很快」，那是该 lane 的 shell 首次冷启动，
+不是回归。索引冷建（约 1,300 文件 / 9.5 MB 的仓库量级）同样落在就绪之后，实测 20 s 上下，
+全程不占工具调用。
 
 
 ## 11. 运维与排障
@@ -312,7 +357,8 @@ worker 镜像、完整性判定和日志路径。
 | 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `@keer1024/dsh-native`（只写 `dependencies` 不够） | 补 bundles + `pnpm install` + 重启 |
 | 面板 401 / 404 | 浏览器没带凭据，或路由没挂上 | 看 `/health` 的 `routes.registered`；404 会退避重挂 |
 | 工具报 `拒绝访问 (os error 5)` 写 `%TEMP%` / `~/.dsh` | 旧版（≤1.6.0）worker 是低完整性进程；1.6.1 已把镜像搬到 `%LOCALAPPDATA%\dsh-native\bin` 再启动 | 先看错误里的 `[dsh-native]` 提示与 `rust_health.logPath`；仍拒绝则多半是 deny ACE / 只读 / 文件被占用 |
-| 首次 `exec` 3–20 s | PowerShell 进程冷启动 | 正常；已在启动期预热 |
+| 首次 `exec` 3–20 s | 该 lane 的 PowerShell 进程冷启动 | 正常；worker 已在延迟启动窗口里预热 lane（`prewarmIndex:false` 时改为懒启动） |
+| 监控器一直显示「启动中…」 | `readiness.phase` 停在 `pending/starting`，或 worker 拉起失败 | 看 `/health` 的 `phase` 与 `readiness.error`；`failed` 时多半是镜像被拦（SmartScreen/ACL），日志在 `%LOCALAPPDATA%\dsh-native\logs` |
 | 强杀 worker 后残留 `powershell.exe` | Windows 不杀进程树 | `kill()` 用 `taskkill /T`；新 worker 启动时再扫一遍死父进程的 shell |
 | 状态条/视图不更新 | 页面还是旧 client bundle | 刷新页面；仍不行则重启 DSH |
 
@@ -329,19 +375,20 @@ node tools\lifecycle_test.mjs                    # 10 项：强杀恢复、冻�
 node tools\reap_guard_test.mjs                   # 7 项：锁文件不误杀宿主/父进程/无关 pid
 node tools\sweep_test.mjs                        # 3 项：孤儿 PowerShell 清扫
 node tools\pool_test.mjs                         # 10 项：热扩缩、公平、软限、拒绝
-node tools\route_retry_test.mjs                  # 路由退避挂载（7 条）
+node tools\route_retry_test.mjs                  # 路由退避挂载（8 条）
 node tools\panel_render_test.mjs                 # 设置页渲染 + Apply 热配置
 node tools\projection_render_test.mjs            # 固定头部、筛选、420px 详情、windowed
-node tools\monitor_render_test.mjs               # 监控器 min/max 卡片、sparkline、workers/会话表、状态条
+node tools\monitor_render_test.mjs               # 三行卡片、跟随选中 worker 的曲线组、状态条、无 legacy 表
 node tools\head_open_test.mjs                    # 会话首屏 head 模式
 node tools\session_probe.mjs                     # 会话投影冷/热/分页实测
 node tools\p2_bench.mjs                          # 同召回 token 降幅
 node tools\verify_low_il_fix.mjs                 # 2 项：带 Low 标签的原镜像写拒绝 / 搬迁副本写成功
 node tools\plugin_worker_probe.mjs               # 1 项：直接拉起部署版 RustWorker，验证 relocated + 写工作区
+node tools\build_plugin.mjs --skip-rust          # 构建脚本自检：换装跳过、npm pack、落 bin/ + dist/ + sha256
 ```
 
-最近一次全量（2026-10-22）：identity 20/20、worker 15/15、lifecycle 10/10、pool 10/10、
-reap 7/7、sweep 3/3，渲染与路由脚本全绿。
+最近一次全量（2026-10-23）：identity 20/20、worker 15/15、lifecycle 10/10、pool 10/10、
+reap 7/7、sweep 3/3，渲染、路由与构建脚本全绿。
 
 
 ## 13. 兼容性与限制
@@ -355,8 +402,12 @@ reap 7/7、sweep 3/3，渲染与路由脚本全绿。
 - **低完整性**：1.6.1 起 worker 从 `%LOCALAPPDATA%\dsh-native\bin` 的副本启动，不再继承 DSH
   给工作区镜像打的 Low IL 标签；若某台机器的策略把副本也打了标，日志与错误提示会指名道姓
   报出来（见排障表）。
-- **分发状态**：包名 `@keer1024/dsh-native`，npm 上尚未上架（已登录 `keer1024`，发布卡在 2FA）；
-  当前通过 tarball / 目录 link 分发，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
+- **分发状态**：包名 `@keer1024/dsh-native`；GitHub 仓库 `keer1024/dsh-native`（origin 走 SSH，
+  本机已可推送，tag `v1.6.1`）。npm 上这个 scope 包还没发布成功——本机 `~\.npmrc` 里指向
+  `registry.npmjs.org` 的 token 已失效（`npm whoami` 报 `E401`），拿到新的 automation token 后
+  执行 `npm publish --registry https://registry.npmjs.org --@keer1024:registry=https://registry.npmjs.org`
+  即可。在此之前一律通过根目录 `bin/` 里的 tarball 或目录 link 分发，步骤见
+  [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
 
 
 ## 14. 目录结构
@@ -364,15 +415,17 @@ reap 7/7、sweep 3/3，渲染与路由脚本全绿。
 
 ```
 packages/dsh-rust-exec/      host 插件 + 客户端叠加物 + 预编译 worker
-  index.js                   Config / RustWorker / WorkerPool / MetricsStore / 10 工具 / 7 路由
+  index.js                   Config / RustWorker / WorkerPool / MetricsStore / 10 工具 / 8 路由
   client.js                  设置页、监控器、会话视图、状态条（React，零依赖）
   cordis.patch.yml           bundle patch（insert dsh-native）
   locale/{zh,en}.json        meta.title / meta.description
   bin/dsh-rust-worker.exe    预编译 worker（随包发布）
 packages/dsh-rust-worker/    Rust 源码（main.rs / index.rs / session.rs / metrics.rs）
 tools/                       验收与基准脚本
+  build_plugin.mjs           构建脚本：编译 → 换装 worker → npm pack → bin/ + dist/ + sha256
+bin/                         最新安装包（keer1024-dsh-native-<版本>.tgz + .sha256，随仓库提交）
 docs/rust-exec-plugin/       设计、实测、发布、分发文档
-dist/                        打包产物（tarball + sha256）
+dist/                        历史打包产物（tarball + sha256，已 gitignore）
 ```
 
 
@@ -394,8 +447,10 @@ dist/                        打包产物（tarball + sha256）
 **dsh-native** is a resident Rust sidecar for [DeepSeek Harness](https://github.com/deepseek-ai). Command execution, sha256-guarded file IO, code indexing/search, session-log projection and resource sampling all run in a long-lived Rust worker; the host stays a thin JSON-RPC / lane-scheduling / route layer.
 
 - **10 tools** — `rust_exec`, `rust_read`, `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_search`, `rust_symbols`, `rust_session_open`, `rust_health`
-- **7 routes** — `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config}`
-- **UI** — pinned-header projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor (lifecycle min/max + sparkline), `R-Native` resource strip
+- **8 routes** — `/api/dsh-rust-exec/{metrics,cache,health,events,sessions,session,session/body,config}`
+- **UI** — pinned-header projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor (three card rows: workers, sessions, cache + per-worker sparkline group following the selected worker), `R-Native` resource strip
+- **Async start** — DSH boots first; the worker starts 1.2 s later (`deferStart` / `startDelayMs`) and the UI back-fills data the moment `readiness` turns `ready` (no page reload)
+- **Build / package** — `node tools/build_plugin.mjs` compiles the worker, swaps the binary, runs `npm pack` and drops the tarball + `.sha256` into the repo root `bin/` (latest only) and `dist/` (archive); `--skip-rust` and `--no-archive` for the other two modes
 - **Install** — `pnpm add @keer1024/dsh-native`, add `@keer1024/dsh-native` to `dsh.profile.bundles`, restart DSH
 - **Requires** — Windows 10/11 x64 · DSH desktop · PowerShell 5.1 (no Node.js on the target machine)
 

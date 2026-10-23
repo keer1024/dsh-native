@@ -7,6 +7,25 @@
  * worker children, spawns them on demand (the first one eagerly at apply time),
  * matches responses by request id, and kills the pool when the plugin is disposed.
  */
+/**
+ * 模块职责（宿主侧 ESM bundle，dsh-native 插件）
+ *
+ * 把预编译的 `dsh-rust-worker` 子进程包装成 DSH 工具：WorkerPool 负责 worker
+ * 进程生命周期、lane 池、每会话队列、空闲回收与 RSS/CPU 软限制；工具注册层做
+ * 渐进披露（常驻 rust_exec / rust_read / rust_search / rust_health / native_help，
+ * 其余按需激活）；MetricsStore 以 1 s 采样维护环形历史与 readiness 状态机；
+ * installRoutes 把 /metrics /cache /health /events /sessions /session
+ * /session/body 挂到可选的 webServer；apply() 负责延迟启动、warmIndex 与清理。
+ *
+ * 关键不变量：
+ * - 失败以返回值或错误对象呈现，apply() 自身不抛异常：宿主缺少某个 seam 时降级并记日志。
+ * - 超时全部取自显式常量（DEFAULT_TIMEOUT_MS 60 s、HANDSHAKE_TIMEOUT_MS 5 s、
+ *   START/SEARCH/SESSION 为 15/60/120 s），exec 额外叠加 SHELL_TIMEOUT_GRACE_MS。
+ * - 字节上限固定：stderr 仅留 MAX_STDERR_BYTES，渲染层用 truncated/shown/total 报截断。
+ * - 工具名必须与 RESIDENT_TOOL_NAMES / DORMANT_TOOL_NAMES 完全一致；native_help
+ *   只激活后者中的名字，重复注册由 disposers 去重。
+ * - readiness 单向推进 pending → starting → ready|failed，面板与 /health 读同一对象。
+ */
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
@@ -40,6 +59,7 @@ const DEFAULT_TIMEOUT_MS = 60_000
 const START_TIMEOUT_MS = 15_000
 /** Extra time the plugin waits beyond a command's own timeout before killing the worker. */
 const SHELL_TIMEOUT_GRACE_MS = 5_000
+/** stderr 只保留尾部 2 KB：它是诊断线索，不会回传给模型。 */
 const MAX_STDERR_BYTES = 2_000
 /** A tool call slower than this is logged even when it succeeds. */
 const SLOW_CALL_MS = 5_000
@@ -47,6 +67,7 @@ const SEARCH_TIMEOUT_MS = 60_000
 // A cold projection of a multi-megabyte log pays zstd decode + JSON parse once; the cache makes
 // later opens cheap, so this only bounds the worst-case first open.
 const SESSION_TIMEOUT_MS = 120_000
+/** 协议版本守卫：宿主与 worker 各持一份，握手时比对，不匹配就让 worker 退出而不是错跑。 */
 /** Must match `PROTOCOL_VERSION` in the worker's main.rs. */
 const HELLO_VERSION = 1
 const HANDSHAKE_TIMEOUT_MS = 5_000
@@ -92,14 +113,17 @@ const DEFAULT_START_DELAY_MS = 1_200
 const METRICS_FAST_POINTS = 300
 const METRICS_SLOW_BUCKETS = 60
 const METRICS_SLOW_BUCKET_MS = 60_000
+/** 所有 HTTP 路由共享的前缀；面板与 /health 都按它拼路径。 */
 const METRICS_ROUTE_PREFIX = '/api/dsh-rust-exec'
 
+/** 硬依赖：没有 tools 服务就不挂工具；webServer 等其余 seam 都是可选的。 */
 export const inject = ['tools']
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
+/** 配置模式：只做校验与归一化，不改写 Loader 行；非法值汇总成 issues，不抛异常。 */
 /**
  * Standard Schema: Cordis validates a Loader row's `config` through
  * `Config['~standard'].validate` and passes the returned `value` to `apply`.
@@ -165,17 +189,23 @@ export const Config = {
         && !(typeof raw.cpuSoftLimitPct === 'number' && raw.cpuSoftLimitPct >= 10 && raw.cpuSoftLimitPct <= 100)) {
         issues.push({ message: 'cpuSoftLimitPct must be a number from 10 to 100', path: ['cpuSoftLimitPct'] })
       }
+      // 校验与归一化分离：这里只报告问题，默认值填充统一交给 normalizeConfig。
       if (issues.length > 0) return { issues }
       return { value: normalizeConfig(raw) }
     },
   },
 }
 
+/** 逻辑 CPU 数；读不到时按 4 核估算，供 lanes 默认值使用。 */
 function coreCount() {
   const cores = cpus()?.length ?? 4
   return Math.max(1, cores)
 }
 
+/**
+ * 把校验过的原始配置补成完整配置对象：每个键独立回退默认值，未知键直接丢弃。
+ * lanes 未指定时取核数的一半（至少 1、至多 DEFAULT_LANES），避免小机器起太多 shell。
+ */
 function normalizeConfig(value) {
   const raw = value && typeof value === 'object' ? value : {}
   const lanes = Number.isInteger(raw.lanes) && raw.lanes >= 1 && raw.lanes <= MAX_LANES
@@ -243,12 +273,14 @@ function normalizeConfig(value) {
 // Worker client: one framed-JSON-RPC child process, lazy, self-healing
 // ---------------------------------------------------------------------------
 
+/** 单实例锁路径：每个 profile 一份，内容为 worker pid + 宿主实例 token。 */
 /** Where the worker records `pid\nhostInstance`; mirrors `claim_lock` in main.rs. */
 function workerLockPath() {
   const home = process.env.DSH_HOME ?? join(process.env.USERPROFILE ?? homedir(), '.dsh')
   return join(home, 'run', `dsh-rust-worker-${process.env.DSH_PROFILE ?? 'default'}.lock`)
 }
 
+/** 宿主实例 token：整个池共用一个，避免新 worker 把同池兄弟判成陈旧锁持有者而杀掉。 */
 /**
  * Identity of *this* DSH host process. It must be shared by every worker in the
  * pool: the single-instance lock file is one per profile, so a per-worker token
@@ -293,6 +325,7 @@ const RECENT_ERROR_LIMIT = 20
 const INTEGRITY_CACHE = new Map()
 let logPathCache = null
 
+/** 每个宿主进程一个 JSONL 诊断日志路径；首次调用后缓存，避免每行都重拼路径。 */
 function workerLogPath() {
   logPathCache ??= pluginStateDir('logs', `rust-exec-${process.pid}.log`)
   return logPathCache
@@ -307,6 +340,7 @@ function logEvent(event, fields = {}) {
   try {
     const path = workerLogPath()
     mkdirSync(dirname(path), { recursive: true })
+    // 超过 2 MB 就轮转成 .log.1：只保留一代，覆盖旧文件失败也不影响本次写入。
     if (existsSync(path) && statSync(path).size > LOG_MAX_BYTES) {
       const previous = `${path}.1`
       try {
@@ -337,6 +371,7 @@ function workerImageName(workerPath) {
   return basename(workerPath).toLowerCase()
 }
 
+/** 探测 pid 是否仍运行 worker 映像（yes/no/unknown）；unknown 一律不当作"已死"。 */
 /**
  * Whether `pid` currently runs the worker image: `'yes'`, `'no'` (a different
  * process, or nothing at all) or `'unknown'` (the probe itself failed).
@@ -370,6 +405,7 @@ function probeWorkerImage(pid, expectedImage) {
   return 'unknown'
 }
 
+/** 读可执行文件的 Windows 完整性标签：low 表示被沙箱标记过，需要迁出工作区再启动。 */
 /**
  * Integrity label of an executable *file*, as Windows will honour it at launch.
  *
@@ -395,6 +431,7 @@ function imageIntegrity(path) {
   return verdict
 }
 
+/** 把 worker 复制到插件状态目录（文件名带 size-mtime 指纹），绕开工作区内的 Low-IL 标签。 */
 /**
  * Copy the worker out of the workspace so it stops inheriting a Low-IL label,
  * and return the path to the copy. One 2 MB copy per build: the name carries
@@ -433,6 +470,7 @@ function relocateWorker(source) {
   return target
 }
 
+/** 只保留当前副本与次新的一份，其余视为旧构建删除；清理失败不算错误。 */
 /** Keep the live copy plus one older generation; the rest are stale builds. */
 function pruneWorkerCopies(dir, keep) {
   try {
@@ -453,6 +491,7 @@ function pruneWorkerCopies(dir, keep) {
   }
 }
 
+/** 结束整个进程树（Windows 用 taskkill /T /F），否则 PowerShell 孙进程会占住管道不放。 */
 /**
  * Kill `pid` and everything it started. The worker owns a PowerShell shell
  * server; a bare `child.kill()` leaves those grandchildren holding the pipes.
@@ -477,6 +516,7 @@ function killProcessTree(pid) {
   }
 }
 
+/** 仅当锁文件内容仍等于我们判定为陈旧的那份时才删除，避免误删别的实例刚写的锁。 */
 /** Drop the lock, but only if it still holds the exact record we judged stale. */
 function dropStaleLock(expectedText) {
   try {
@@ -487,6 +527,7 @@ function dropStaleLock(expectedText) {
 }
 
 /** The record this host writes for one of its workers; `claim_lock` in main.rs uses the same shape. */
+/** 锁文件内容格式 `workerPid\nhostInstance`，与 worker 侧 claim_lock 保持同构。 */
 function lockText(pid) {
   return `${pid}\n${HOST_INSTANCE}`
 }
@@ -498,6 +539,7 @@ function lockText(pid) {
  * with `拒绝访问`. The host is the reliable writer; on a later boot #reapStale
  * uses this record to clear a worker the previous host left behind.
  */
+/** 宿主侧写锁，返回写入文本（失败返回 null）；低完整性 worker 自己写不了这个目录。 */
 function claimWorkerLock(pid) {
   const text = lockText(pid)
   try {
@@ -509,12 +551,18 @@ function claimWorkerLock(pid) {
   }
 }
 
+/** 释放本宿主为某 pid 写的锁；内容不匹配说明锁已易主，直接跳过。 */
 /** Remove this host's record for `pid` (a different record belongs to someone else). */
 function releaseWorkerLock(pid) {
   if (!pid) return
   dropStaleLock(lockText(pid))
 }
 
+/**
+ * 一个 worker 子进程的客户端：spawn、hello/initialize 握手、心跳、超时、重启与锁文件都在这里。
+ * 对外只有 start / call / health / kill；JSON-RPC 分帧、按 id 配对、写串行化均为内部实现。
+ * 进程自愈也由本类负责，WorkerPool 只做调度决策。
+ */
 export class RustWorker {
   #child = null
   #pending = new Map()
@@ -542,6 +590,7 @@ export class RustWorker {
   /** `low` / `normal` / `unknown` — integrity Windows starts the source image at. */
   #integrity = null
 
+  /** `workerPath` 是打包/开发路径；`lanes` 与 `maxQueueDepth` 会作为环境变量传给子进程。 */
   constructor(workerPath, options = {}) {
     this.workerPath = workerPath
     this.options = {
@@ -555,6 +604,7 @@ export class RustWorker {
     return this.#child !== null
   }
 
+  /** 幂等启动：并发首次调用共享同一次 spawn；退避等待期内不会每次调用都重试。 */
   /** Start the child if needed. Concurrent first calls share one spawn. */
   start() {
     if (this.#child) return Promise.resolve(this.info)
@@ -574,6 +624,7 @@ export class RustWorker {
     return this.#starting
   }
 
+  /** 发送一个请求：超过 SLOW_CALL_MS 的成功调用也记一行日志，超时则顺手杀掉 worker。 */
   /** Send one JSON-RPC request, starting the worker on demand. */
   async call(method, params, timeoutMs, signal) {
     await this.start()
@@ -596,6 +647,7 @@ export class RustWorker {
     }
   }
 
+  /** 把访问被拒的裸 `os error 5` 补成可执行的诊断（worker 路径、完整性、日志位置）。 */
   /**
    * Record why a call failed, and turn a bare `os error 5` into something the
    * reader can act on: which worker, at what integrity, and where the log is.
@@ -623,6 +675,7 @@ export class RustWorker {
       + `the worker itself starting at Low integrity. Log: ${workerLogPath()}`
   }
 
+  /** 本地计数 + worker 自述合成一份快照；worker 不在或自述超时也必须返回本地部分。 */
   /** Lifecycle snapshot: local counters merged with the worker's own view. */
   async health() {
     const local = {
@@ -654,6 +707,7 @@ export class RustWorker {
     }
   }
 
+  /** 停止子进程并拒绝所有挂起请求；先杀进程树再拆管道，否则孙进程会一直持有管道。 */
   /** Stop the child and reject everything still waiting on it. */
   kill(reason = 'rust worker stopped') {
     this.#stopHeartbeat()
@@ -696,6 +750,7 @@ export class RustWorker {
     releaseWorkerLock(lockPid)
   }
 
+  /** 清理上一宿主遗留的 worker：先核对锁里的 pid 仍是 worker 映像，再发信号。 */
   /**
    * Kill a worker left behind by a *previous* DSH instance. The worker's own
    * pid watch already handles a dead host within a second, but a still-alive
@@ -733,6 +788,7 @@ export class RustWorker {
     dropStaleLock(text)
   }
 
+  /** 决定实际启动路径：仅 low 完整性时复制迁出，迁出失败就退回原路径继续跑。 */
   /**
    * Which image to run. A worker started from inside a DSH workspace is a
    * Low-integrity process (see `imageIntegrity`), and such a worker cannot write
@@ -753,6 +809,7 @@ export class RustWorker {
     }
   }
 
+  /** 完整启动流程：清残留锁 → 选启动路径 → spawn → hello/initialize 握手 → 起心跳。 */
   async #spawn() {
     const startedAt = performance.now()
     this.#reapStale()
@@ -814,6 +871,7 @@ export class RustWorker {
     }, HANDSHAKE_TIMEOUT_MS)
     const info = await this.#request('initialize', {}, START_TIMEOUT_MS)
     this.info = { ...info, welcome }
+    // pid 可能只出现在 hello 或 initialize 之一；拿不到就不写锁，免得下次启动误杀。
     const workerPid = Number(welcome?.workerPid ?? info?.worker?.pid ?? 0)
     this.#lockPid = workerPid > 0 ? workerPid : null
     if (this.#lockPid) claimWorkerLock(this.#lockPid)
@@ -830,6 +888,7 @@ export class RustWorker {
     return this.info
   }
 
+  /** 非主动退出：拒绝挂起请求、清空 slot、记日志、释放锁，最后按退避安排重启。 */
   /** Unexpected process death: reject pending calls and clear the slot. */
   #fail(message) {
     const child = this.#child
@@ -878,9 +937,11 @@ export class RustWorker {
     this.#scheduleRestart()
   }
 
+  /** 按 `Content-Length` 分帧解包 stdout：先攒进 #buffer，凑满一帧才解析并派发。 */
   #onStdout(chunk) {
     const now = performance.now()
     if (this.#lastInboundAt > 0) {
+      // 只留最近 512 个入站间隔：够算 p50/p99，又不会随进程寿命无界增长。
       this.#activityGaps.push(now - this.#lastInboundAt)
       if (this.#activityGaps.length > 512) this.#activityGaps.shift()
     }
@@ -897,6 +958,7 @@ export class RustWorker {
       }
       const bodyStart = headerEnd + 4
       const bodyEnd = bodyStart + Number(match[1])
+      // 帧体还没收齐就返回，等下一次 data 事件继续拼；绝不按半帧解析。
       if (this.#buffer.length < bodyEnd) return
       const body = this.#buffer.subarray(bodyStart, bodyEnd).toString('utf8')
       this.#buffer = this.#buffer.subarray(bodyEnd)
@@ -911,6 +973,7 @@ export class RustWorker {
     }
   }
 
+  /** 按 id 配对响应：成功走 resolve，JSON-RPC error 转成带 workerCode 的 Error 后 reject。 */
   #settle(message) {
     const pending = this.#pending.get(message.id)
     if (!pending) return
@@ -931,6 +994,7 @@ export class RustWorker {
   // not fire a burst of catch-up ticks and declare the worker dead
   // -------------------------------------------------------------------------
 
+  /** 2 s 心跳（setTimeout 链，非 setInterval）：顺带判定静默并投递 ping 帧。 */
   #startHeartbeat() {
     this.#stopHeartbeat()
     const tick = () => {
@@ -957,6 +1021,7 @@ export class RustWorker {
     this.#beatTimer.unref?.()
   }
 
+  /** 停心跳并复位探测标志，保证下次启动的心跳链可以重新开始。 */
   #stopHeartbeat() {
     if (this.#beatTimer !== null) {
       clearTimeout(this.#beatTimer)
@@ -965,6 +1030,7 @@ export class RustWorker {
     this.#probing = false
   }
 
+  /** 怀疑流程：投两个间隔 1 s 的探针，再等 2.2 s 复核；有请求在飞时不判死。 */
   /**
    * Suspected death: two probes 1 s apart, then one last check. A request in
    * flight exempts the worker — its own timeout is the authority then, because a
@@ -987,12 +1053,14 @@ export class RustWorker {
       this.#probing = false
       if (!this.#child || this.#pending.size > 0) return
       if (performance.now() - this.#lastInboundAt <= WORKER_SILENCE_MS) return
+      // 探针与最后一次入站都超过静默阈值：计一次丢失，杀掉后按退避重排重启。
       this.#misses += 1
       this.kill('rust worker stopped answering heartbeats')
       this.#scheduleRestart()
     }, 2 * PROBE_GAP_MS + 200).unref?.()
   }
 
+  /** 失败计数 +1，按退避阶梯 0/0.5/2/5/30 s 安排下次启动；超出阶梯后固定 30 s。 */
   #scheduleRestart() {
     this.#failCount += 1
     const delay = RESTART_BACKOFF_MS[Math.min(this.#failCount, RESTART_BACKOFF_MS.length - 1)]
@@ -1014,6 +1082,7 @@ export class RustWorker {
       .catch(() => {})
   }
 
+  /** 发请求并等同 id 的响应；超时或 abort 会摘除自己的 pending 条目，不留悬空。 */
   #request(method, params, timeoutMs, signal) {
     const child = this.#child
     if (!child) return Promise.reject(new Error('rust worker is not running'))
@@ -1025,6 +1094,7 @@ export class RustWorker {
     const id = this.#nextId
     this.#nextId += 1
     return new Promise((resolve, reject) => {
+      // 超时只负责 reject 并摘除条目；是否杀掉 worker 由 call() 按错误码决定。
       const timer = setTimeout(() => {
         if (!this.#pending.delete(id)) return
         const error = new Error(`rust worker request ${method} timed out after ${timeoutMs} ms`)
@@ -1070,6 +1140,7 @@ export class RustWorker {
 // Render helpers: compact text the model actually reads
 // ---------------------------------------------------------------------------
 
+/** 把纯文本包成 DSH 工具输出要求的 content 数组。 */
 /** @param {unknown} value */
 function textOf(value) {
   return [{ type: 'text', text: String(value) }]
@@ -1103,6 +1174,7 @@ function shortHash(hash) {
   return typeof hash === 'string' && hash.length > HASH_PREFIX ? hash.slice(0, HASH_PREFIX) : (hash ?? '')
 }
 
+/** 渲染 exec 结果：正文 + 一行 [exit …] 页脚；页脚必须写明排队耗时与 stdout 截断情况。 */
 function renderExec(value) {
   const { exitCode, stdout, ms, wallMs, queueMs, aborted, truncated, totalBytes, shownBytes } = value
   const body = trimTail(stdout)
@@ -1126,12 +1198,14 @@ function renderExec(value) {
 // nothing, so the second identical read returns a notice instead of the body.
 // Modelled on dsh-ops' read-observation key; `refresh: true` always reprints.
 // ---------------------------------------------------------------------------
+// 上限 256 条、TTL 5 分钟：键是"会话|路径|offset|limit"，命中还要求 sha 完全一致。
 const READ_CACHE_LIMIT = 256
 const READ_CACHE_TTL_MS = 5 * 60_000
 const readCache = new Map()
 /** Hit/miss counters for the observation cache, surfaced by `/metrics.cache.read`. */
 const readCacheStats = { hits: 0, misses: 0 }
 
+/** 观察缓存的键：会话 id + 路径 + offset/limit；同一文件的不同页互不影响。 */
 function readCacheKey(exec, params) {
   return `${exec?.agent?.id ?? 'default'}|${params.path}|${params.offset ?? 1}|${params.limit ?? ''}`
 }
@@ -1172,7 +1246,9 @@ function readCacheSnapshot() {
   }
 }
 
+/** 写入或刷新缓存条目，再按插入顺序淘汰最旧条目，把容量压在 READ_CACHE_LIMIT 内。 */
 function rememberRead(key, hash) {
+  // 先删再插：Map 保持插入顺序，这样"最近用过"的条目总在队尾，淘汰从队首开始。
   readCache.delete(key)
   readCache.set(key, { hash, at: Date.now() })
   while (readCache.size > READ_CACHE_LIMIT) readCache.delete(readCache.keys().next().value)
@@ -1229,6 +1305,7 @@ function compressRead(text) {
   return { text: out.join('\n'), removed, dedented }
 }
 
+/** 按 compactReads 配置压缩读取结果；未产生任何变化时原样返回，不伪造 compacted 标记。 */
 function compactReadValue(value) {
   if (typeof value.content !== 'string' || !value.content) return value
   const result = compressRead(value.content)
@@ -1236,6 +1313,7 @@ function compactReadValue(value) {
   return { ...value, content: result.text, compacted: true, compactedLines: result.removed }
 }
 
+/** 渲染 read：正文 + 页脚（路径、行范围、字节数、sha、完整性、下一个 offset）。 */
 function renderRead(value) {  if (typeof value.unchangedForMs === 'number' && value.unchangedForMs > 0) {
     return `[unchanged ${Math.round(value.unchangedForMs / 1000)}s ago · ${relPath(value.path)} · `
       + `${value.totalLines} lines · sha ${shortHash(value.hash)} · refresh:true to reprint]`
@@ -1263,20 +1341,24 @@ function renderRead(value) {  if (typeof value.unchangedForMs === 'number' && va
   return content ? `${trimTail(content)}\n${footer}` : footer
 }
 
+/** 渲染 write：写入字节数、路径与新的 sha 前缀。 */
 function renderWrite(value) {
   return `wrote ${value.bytes} B → ${relPath(value.path)} · sha ${shortHash(value.hash)}`
 }
 
+/** 渲染 edit：替换次数与新的 sha 前缀。 */
 function renderEdit(value) {
   return `edited ${relPath(value.path)}: ${value.replacements} replacement(s) · sha ${shortHash(value.hash)}`
 }
 
+/** 渲染 stat：三态固定格式——不存在 / 目录 / 文件（大小与 mtime）。 */
 function renderStat(value) {
   if (!value.exists) return `${relPath(value.path)}: missing`
   if (value.isDir) return `${relPath(value.path)}: directory · mtime ${new Date(value.mtimeMs).toISOString()}`
   return `${relPath(value.path)}: file · ${value.size} B · mtime ${new Date(value.mtimeMs).toISOString()}`
 }
 
+/** 渲染目录列表：目录名带尾斜杠，文件附带字节数；空目录明确写 (empty)。 */
 function renderList(value) {
   const entries = Array.isArray(value.entries) ? value.entries : []
   if (entries.length === 0) return `${relPath(value.path)}: (empty)`
@@ -1305,6 +1387,7 @@ function renderSearch(value) {
   return lines.join('\n')
 }
 
+/** 渲染符号列表：每行"路径:行号 [kind] 签名"，页脚给匹配数与耗时。 */
 function renderSymbols(value) {
   const symbols = Array.isArray(value.symbols) ? value.symbols : []
   const lines = symbols.map((sym) => `${relPath(sym.path)}:${sym.line} [${sym.kind}] ${sym.sig || sym.name}`)
@@ -1314,6 +1397,7 @@ function renderSymbols(value) {
   return lines.join('\n')
 }
 
+/** 渲染会话投影的一页：计数 + 分段耗时 + 游标范围，再逐条列出消息预览。 */
 function renderSession(value) {
   const timings = value.timings ?? {}
   const counts = value.counts ?? {}
@@ -1344,12 +1428,14 @@ function renderSession(value) {
 // Worker pool: fairness, idle reclaim, soft limits, multi-process isolation
 // ---------------------------------------------------------------------------
 
+/** 统一的"调用在开始前被取消"错误，code 固定 WORKER_ABORTED 供上层识别。 */
 function abortError() {
   const error = new Error('rust worker call aborted before it started')
   error.code = 'WORKER_ABORTED'
   return error
 }
 
+/** 队列已满的拒绝错误：带 retryAfterMs，提示调用方约 250 ms 后重试。 */
 function busyError(detail) {
   const error = new Error(`rust worker pool saturated: ${detail}; retry in ~${QUEUE_RETRY_MS} ms`)
   error.code = 'WORKER_BUSY'
@@ -1357,6 +1443,7 @@ function busyError(detail) {
   return error
 }
 
+/** 进程池：按会话分配 worker、限流、空闲回收，并对 RSS/CPU 施加只作用于索引的软限制。 */
 /**
  * Owns 1..maxWorkers `RustWorker` processes and decides which one runs a call.
  *
@@ -1383,6 +1470,7 @@ export class WorkerPool {
   #soft = { paused: false, lastDropAt: 0, lastAction: null, lastActionAt: 0, rssLimitHit: 0, cpuLimitHit: 0 }
   stats = { calls: 0, queued: 0, rejected: 0, retired: 0, spawned: 0 }
 
+  /** 构造即开始 5 s 周期巡检（#tick）；定时器 unref，不拖住宿主退出。 */
   constructor(workerPath, options = {}, log = () => {}) {
     this.workerPath = workerPath
     this.log = log
@@ -1400,6 +1488,7 @@ export class WorkerPool {
     this.#timer.unref?.()
   }
 
+  // 只读视图：size / running / queueDepth / softLimits 供 /metrics 与 rust_health 读取。
   get size() {
     return this.#entries.length
   }
@@ -1424,17 +1513,20 @@ export class WorkerPool {
     return Math.max(1, Math.min(MAX_LANES, shared || 1))
   }
 
+  /** 只拉起一个 worker，让首次工具调用不必等冷启动。 */
   /** Spawn the first worker eagerly so the first tool call does not pay boot. */
   start() {
     return this.#entry().worker.start()
   }
 
+  /** 杀掉池中全部 worker 并清空会话亲和；dispose 与热配置失败都会走到这里。 */
   kill(reason = 'rust worker pool stopped') {
     for (const entry of this.#entries) entry.worker.kill(reason)
     this.#entries = []
     this.#sessionEntry.clear()
   }
 
+  /** 先停巡检定时器再 kill，保证拆卸过程中不会又拉起新 worker。 */
   dispose() {
     if (this.#timer) {
       clearInterval(this.#timer)
@@ -1452,6 +1544,7 @@ export class WorkerPool {
     if (signal?.aborted) return Promise.reject(abortError())
     return new Promise((resolve, reject) => {
       const job = { method, params, timeoutMs, signal, sessionId, resolve, reject, enqueuedAt: 0 }
+      // 能立刻拿到空闲 lane 就直启，否则进该会话的队列；队列上限与公平性在下面处理。
       if (this.#canStart(sessionId)) this.#start(job)
       else this.#enqueue(job)
     })
@@ -1463,6 +1556,7 @@ export class WorkerPool {
     return entry.worker.call('metrics.sample', {}, 4_000)
   }
 
+  /** 主 worker 的健康 + 池快照；池为空时返回 running:false 的等价结构，调用方不必判空。 */
   async health() {
     const primary = this.#entries[0]?.worker
     if (!primary) {
@@ -1515,6 +1609,7 @@ export class WorkerPool {
     const rssMb = Number(sample.memory?.workingSetBytes ?? sample.workingSetBytes ?? 0) / (1024 * 1024)
     const cpuPct = Number(sample.cpu?.cpuPctOneCore ?? sample.cpuPctOneCore ?? 0)
     const now = Date.now()
+    // 先按 RSS 丢索引（可重建），两次之间冷却 60 s，避免在阈值附近反复重建。
     if (rssMb > this.options.rssSoftLimitMb && now - this.#soft.lastDropAt >= SOFT_LIMIT_DROP_COOLDOWN_MS) {
       this.#soft.lastDropAt = now
       this.#soft.rssLimitHit += 1
@@ -1538,6 +1633,7 @@ export class WorkerPool {
       this.#soft.lastActionAt = now
       this.log('info', `softlimit.cpu index.pause cpu=${Math.round(cpuPct)}%`)
     } else if (this.#soft.paused && cpuPct < this.options.cpuSoftLimitPct * 0.8) {
+      // 迟滞 20%：降到软限的 80% 以下才恢复，避免在阈值上下抖动导致反复 pause/resume。
       this.#soft.paused = false
       await Promise.all([...this.#entries].map((entry) => entry.worker.call('index.resume', {}, 5_000).catch(() => {})))
       this.#soft.lastAction = 'index.resume: cpu back under 80% of the soft limit'
@@ -1609,11 +1705,13 @@ export class WorkerPool {
 
   // -- scheduling ----------------------------------------------------------
 
+  /** 直启条件：本会话未到并发上限，且池里（或可新开）的 worker 还有空闲 lane。 */
   #canStart(sessionId) {
     const inflight = this.#sessionInflight.get(sessionId) ?? 0
     return inflight < this.options.maxInFlightPerSession && this.#pick(sessionId) !== null
   }
 
+  /** 真正发起调用：先占会话与 worker 的 inflight 名额，结束后在 finally 里归还并再排空队列。 */
   #start(job) {
     const entry = this.#pick(job.sessionId)
     if (!entry) {
@@ -1644,6 +1742,7 @@ export class WorkerPool {
       })
   }
 
+  /** 入队；超过 maxQueueDepth 直接以 WORKER_BUSY 拒绝，abort 时把任务从队列里摘掉。 */
   #enqueue(job) {
     if (this.#queueDepth >= this.options.maxQueueDepth) {
       this.stats.rejected += 1
@@ -1682,6 +1781,7 @@ export class WorkerPool {
    * in-flight cap is rotated (its own completion re-drains it).
    */
   #drain() {
+    // 单次排空最多轮转 guardLimit 步：防止"永远拿不到 lane"时在这里死循环。
     let guard = 0
     const guardLimit = Math.max(4, this.#rotation.length * 8)
     while (this.#queueDepth > 0 && this.#rotation.length > 0 && guard < guardLimit) {
@@ -1720,10 +1820,12 @@ export class WorkerPool {
 
   // -- workers -------------------------------------------------------------
 
+  /** 取主 worker；池空时按需新建，保证第一个工具的首次调用不会因池空失败。 */
   #entry() {
     return this.#entries[0] ?? this.#spawnEntry()
   }
 
+  /** 新建 entry 及其背后的 RustWorker（lanes 取自 lanesPerWorker），并计入 spawned 统计。 */
   #spawnEntry() {
     const entry = {
       id: this.#nextEntryId++,
@@ -1742,6 +1844,7 @@ export class WorkerPool {
     return entry
   }
 
+  /** 选 worker：优先本会话亲和的那个，其次当前最闲的；仍不够才扩池，否则返回 null。 */
   #pick(sessionId) {
     const cap = this.lanesPerWorker
     const live = this.#entries.filter((entry) => !entry.retiring)
@@ -1763,6 +1866,7 @@ export class WorkerPool {
     return null
   }
 
+  /** 5 s 巡检：按 maxWorkers 收缩，再退休"已标记 / 超期空闲"的 worker（有 inflight 的跳过）。 */
   #tick() {
     this.#enforcePoolSize()
     // Retire workers that were marked while busy, then idle ones past the window.
@@ -1793,6 +1897,7 @@ export class WorkerPool {
     }
   }
 
+  /** 把 entry 移出池并杀掉进程，同时清掉指向它的会话亲和，避免之后又被选中。 */
   #retire(entry, reason) {
     const index = this.#entries.indexOf(entry)
     if (index >= 0) this.#entries.splice(index, 1)
@@ -1805,6 +1910,7 @@ export class WorkerPool {
     this.log('info', `pool.retire id=${entry.id} reason=${reason} workers=${this.#entries.length}`)
   }
 
+  /** 扁平化的每 worker 信息，/metrics 与 rust_health 的 workers 字段直接使用。 */
   #workerInfo() {
     return this.#entries.map((entry) => ({
       id: entry.id,
@@ -1830,6 +1936,7 @@ function percentile(values, p) {
   return Math.round(sorted[index])
 }
 
+/** 渲染 rust_health：worker/host 基础信息，再叠加池、软限制、路由与错误。 */
 function renderHealth(value) {
   const worker = value.worker ?? {}
   const lines = [
@@ -1889,12 +1996,18 @@ const DORMANT_TOOL_HINTS = {
   rust_session_open: 'path to a session.v4.jsonl.zstd log, cursor, limit',
 }
 
+/**
+ * 构造全部工具定义（4 个常驻 + native_help + 6 个按需）。每个 execute 都按
+ * pool.call(method, params, timeout, exec.signal, exec.agent.id) 转发；只有 abort
+ * 被转成返回值，worker 报错照常抛给 harness，由它记入工具结果。
+ */
 function createToolDefinitions(pool, config, store, runtime = {}) {
   /** Deadline for an fs request: the configured default. */
   const fsTimeout = () => config.defaultTimeoutMs
 
   return [
     {
+      // 常驻工具：在持久热 shell 里跑 PowerShell；超时与取消由宿主侧兜底。
       name: 'rust_exec',
       description:
         'Run a PowerShell command in a persistent warm shell (fast; prefer this over pwsh). Returns '
@@ -1915,6 +2028,8 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         schema: { type: 'object' },
         render: (_args, value) => textOf(renderExec(value)),
       },
+      // 宿主侧超时多留 SHELL_TIMEOUT_GRACE_MS：让 worker 自己的超时先触发，
+      // 宿主只在 worker 真的不回应时判死，避免误杀正常的长命令。
       async execute(args, exec) {
         const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0
           ? args.timeoutMs
@@ -1953,6 +2068,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 常驻工具：带观察缓存与可选压缩的 UTF-8 读取，页脚 sha 作为写版本守卫。
       name: 'rust_read',
       description:
         'Read a UTF-8 file through the Rust worker and return its content plus the sha256 prefix used '
@@ -1983,6 +2099,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         const value = (args.compact === true || (args.compact !== false && config.compactReads))
           ? compactReadValue(raw)
           : raw
+        // refresh:true 无条件重印但仍刷新缓存；否则命中且 sha 相同就只回 [unchanged] 提示。
         const key = readCacheKey(exec, params)
         if (args.refresh === true) {
           rememberRead(key, value.hash)
@@ -1998,6 +2115,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 按需工具：写文件；expectedHash 提供乐观并发（"absent" 要求文件尚不存在）。
       name: 'rust_write',
       description:
         'Write a UTF-8 file through the Rust worker with an optional version guard. Pass the sha256 '
@@ -2018,6 +2136,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         schema: { type: 'object' },
         render: (_args, value) => textOf(renderWrite(value)),
       },
+      // 版本守卫在 worker 侧：expectedHash 不匹配时不落盘，直接以错误返回。
       async execute(args, exec) {
         const params = { path: args.path, content: args.content }
         if (args.expectedHash !== undefined) params.expectedHash = args.expectedHash
@@ -2030,6 +2149,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 按需工具：字面量替换；oldString 有歧义时失败，replaceAll 才允许全替换。
       name: 'rust_edit',
       description:
         'Replace a literal string in a file through the Rust worker. An ambiguous oldString fails '
@@ -2061,6 +2181,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 按需工具：路径存在性 / 类型 / 大小 / mtime；不存在时返回 exists:false 而非报错。
       name: 'rust_stat',
       description:
         'Stat a path through the Rust worker: existence, file-vs-directory, size, and mtime. A '
@@ -2085,6 +2206,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 按需工具：单目录列举，目录名带尾斜杠，limit 限制条目数。
       name: 'rust_ls',
       description:
         'List one directory through the Rust worker (name, directory flag, size); directories end '
@@ -2112,6 +2234,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 常驻工具：查持久代码索引，定义行优先，输出受 maxBytes 预算约束。
       name: 'rust_search',
       description:
         'Search the persistent code index: definition lines rank first, output is budgeted by maxBytes, '
@@ -2148,6 +2271,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 按需工具：只列签名不列正文，用于"看结构"而不是"读全文"。
       name: 'rust_symbols',
       description:
         'List symbols (functions, classes, interfaces, types, consts, structs, enums, traits, impls) '
@@ -2183,6 +2307,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 按需工具：只读投影会话日志，用 cursor + limit 分页，永不写回日志。
       name: 'rust_session_open',
       description:
         'Open a DSH session log (session.v4.jsonl.zstd) through the Rust projection service and return '
@@ -2218,6 +2343,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 常驻工具：worker/池/路由/度量状态；就绪前也返回结构化状态而不是报错。
       name: 'rust_health',
       description:
         'Worker health: pid, uptime, restarts, heartbeat gaps, last exit code, active tools. Use when a '
@@ -2269,6 +2395,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       },
     },
     {
+      // 常驻工具：渐进披露的入口，按需激活休眠工具并返回一行用法提示。
       name: 'native_help',
       description:
         'Enable more rust_* tools for this session: write, edit, stat, ls, symbols, session_open. '
@@ -2319,6 +2446,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
 // probed at apply() time and degrades instead of throwing.
 // ---------------------------------------------------------------------------
 
+/** 探测宿主能力（注册工具 / webServer / logger / events / AbortSignal）；缺哪项就降级。 */
 function detectHost(ctx) {
   const capabilities = {
     toolsRegister: typeof ctx?.tools?.register === 'function',
@@ -2372,6 +2500,7 @@ function makeLog(ctx) {
 // Metrics store: a fixed-size ring the HTTP route and the future panel read
 // ---------------------------------------------------------------------------
 
+/** 把 worker 的嵌套采样压成扁平点（内存/CPU/IO/队列/索引），缺字段按 0 处理。 */
 function pickSample(sample) {
   const memory = sample?.memory ?? {}
   const cpu = sample?.cpu ?? {}
@@ -2404,6 +2533,7 @@ const EXTREME_FIELDS = [
   'queued', 'inflight', 'indexFiles', 'indexSymbols',
 ]
 
+/** 把一次采样折进 lifetime 极值桶：每个字段维护 min/max/last，非数值直接跳过。 */
 function noteExtremes(bucket, point) {
   bucket.samples += 1
   for (const key of EXTREME_FIELDS) {
@@ -2417,6 +2547,7 @@ function noteExtremes(bucket, point) {
   }
 }
 
+/** 度量仓库：1 s 采样进 fast 环（300 点 ≈ 5 分钟），每 60 s 折一个 slow 桶（60 桶 ≈ 1 小时）。 */
 class MetricsStore {
   #timer = null
   #bucketStart = 0
@@ -2445,6 +2576,7 @@ class MetricsStore {
     this.workerHistory = new Map()
   }
 
+  /** 启动采样定时器（幂等）；unref 保证空闲宿主不会被它拖住。 */
   start() {
     if (this.#timer) return
     this.#bucketStart = Date.now()
@@ -2452,12 +2584,14 @@ class MetricsStore {
     this.#timer.unref?.()
   }
 
+  /** 停采样并清空定时器句柄，重复调用安全。 */
   stop() {
     if (!this.#timer) return
     clearInterval(this.#timer)
     this.#timer = null
   }
 
+  /** 热改采样周期：有定时器就先停再按新周期重启，立即生效。 */
   setIntervalMs(intervalMs) {
     this.settings.metricsIntervalMs = intervalMs
     if (this.#timer) {
@@ -2466,6 +2600,7 @@ class MetricsStore {
     }
   }
 
+  /** 一次采样：gate 关闭时只探一次启动，不 spawn；采样后立即施加软限制再入环。 */
   async #tick() {
     // Async startup: sampling a worker that has not been started yet would spawn it
     // on the metrics timer, which is exactly what deferred start avoids. A worker that
@@ -2487,6 +2622,7 @@ class MetricsStore {
     }
   }
 
+  /** 把一条采样写进各级结构：极值桶、fast 环、单 worker 环与 slow 桶。 */
   #push(raw) {
     const now = Date.now()
     const point = { t: now, ...pickSample(raw), pool: this.pool.info() }
@@ -2515,6 +2651,7 @@ class MetricsStore {
     }
   }
 
+  /** 把当前桶内的点折成一条 slow 记录（均值 / 峰值），桶满 60 s 时调用。 */
   #foldBucket() {
     const points = this.#bucket
     const at = (key) => points.map((p) => p[key])
@@ -2535,6 +2672,7 @@ class MetricsStore {
     }
   }
 
+  /** /metrics 的完整响应：配置、历史、极值、池状态、每 worker 明细与缓存计数。 */
   snapshot() {
     return {
       schema: 'dsh-rust-exec/metrics@1',
@@ -2611,6 +2749,7 @@ class MetricsStore {
 // HTTP routes: JSON only, registered on the optional webServer service
 // ---------------------------------------------------------------------------
 
+/** 读并解析 JSON 请求体；超过 limit（默认 64 KB）直接拒绝并销毁连接。 */
 function readJsonBody(req, limit = 64 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -2666,9 +2805,11 @@ function pickPoolConfig(body) {
 // ---------------------------------------------------------------------------
 
 /** `<DSH_HOME>/sessions/<workspace-slug>/<session-id>/session.v<N>.jsonl.zstd` */
+/** 会话日志文件名与 id 的形状约束：id 只允许字母数字与 ._-，从根上杜绝路径穿越。 */
 const SESSION_LOG_RE = /^session\.v\d+\.jsonl\.zstd$/
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
 
+/** 会话日志根目录：优先 DSH_HOME，其次 DSH_PROFILE_DIR 上两级，最后回落 ~/.dsh。 */
 function sessionsRoot() {
   // The host process does not always inherit DSH_HOME (tool children do), so fall
   // back to the documented profile layout and finally to `~/.dsh`.
@@ -2678,6 +2819,7 @@ function sessionsRoot() {
   return join(homedir(), '.dsh', 'sessions')
 }
 
+/** 宽松解析并夹到 [min, max]；解析不出来时用 fallback，保证路由参数永远合法。 */
 function clampInt(raw, fallback, min, max) {
   const value = Number.parseInt(raw ?? '', 10)
   if (!Number.isFinite(value)) return fallback
@@ -2740,8 +2882,14 @@ async function resolveSessionLog(id) {
   return file
 }
 
+/**
+ * 挂载只返回 JSON 的 HTTP 路由。webServer 是可选服务，启动早期可能还不存在，所以
+ * 挂载按退避重试（0/100/250/500/1000/2000 ms，之后每 15 s 一次，永不放弃），
+ * 每次结果都记进 routeState 供 rust_health 读取。返回卸载函数供 ctx.effect 调用。
+ */
 function installRoutes(ctx, { store, pool, settings, log, state }) {
   const routeState = state.routes
+  // 统一响应：JSON + no-store，避免面板轮询命中缓存拿到旧采样。
   const send = (res, status, body) => {
     const text = JSON.stringify(body)
     res.statusCode = status
@@ -2863,6 +3011,7 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
           const seqs = (url.searchParams.get('seqs') ?? '')
             .split(',')
             .map((item) => Number.parseInt(item, 10))
+            // 单次最多 40 条消息体，maxChars 上限 400 000：防止一次请求拉回整段日志。
             .filter((value) => Number.isFinite(value) && value >= 0)
             .slice(0, 40)
           if (seqs.length === 0) {
@@ -2978,6 +3127,11 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
 // Plugin entry
 // ---------------------------------------------------------------------------
 
+/**
+ * 插件入口：归一化配置 → 建池与度量 → 注册工具 → 挂路由 → 通过 ctx.effect 归还清理。
+ * 默认异步启动（deferStart）：先让 DSH 完成首屏，再延迟 1.2 s 拉起 worker；
+ * 任何服务缺失都只降级并记日志，不向宿主抛异常。
+ */
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
   const settings = normalizeConfig(config)
@@ -3020,6 +3174,7 @@ export function apply(ctx, config) {
   // Async startup: DSH paints first, the worker follows. Nothing below blocks the
   // plugin mount, and the metrics tick stays quiet until the worker answers so the
   // sampler cannot spawn it ahead of the schedule.
+  // 状态机：pending → starting → ready|failed，只前进不回退；面板与 /health 读同一对象。
   runtime.readiness = {
     phase: 'pending',
     since: Date.now(),
@@ -3035,6 +3190,7 @@ export function apply(ctx, config) {
   }
   let warmPromise = null
   /** Build the index once, after the worker is up, instead of at spawn time. */
+  /** 只建一次索引：后续调用复用同一 promise；600 s 是冷索引的上限，失败不算插件失败。 */
   const warmIndex = () => {
     if (!settings.prewarmIndex) return Promise.resolve(null)
     if (warmPromise) return warmPromise
@@ -3057,6 +3213,7 @@ export function apply(ctx, config) {
       })
     return warmPromise
   }
+  // 启动入口同样幂等：定时器、/health 探测与首次工具调用可能同时触发。
   runtime.ensureStarted = () => {
     if (runtime.startPromise) return runtime.startPromise
     runtime.readiness.phase = 'starting'
@@ -3097,6 +3254,7 @@ export function apply(ctx, config) {
   // `/metrics` renders the same readiness object the panel polls through `/health`, so the
   // two views can never disagree about whether the worker is up.
   store.readiness = runtime.readiness
+  // 延迟启动：定时器 unref，并登记到 ctx.effect，插件先卸载时不会留下孤儿定时器。
   if (settings.deferStart) {
     const startTimer = setTimeout(() => { void runtime.ensureStarted() }, settings.startDelayMs)
     startTimer.unref?.()
@@ -3110,6 +3268,7 @@ export function apply(ctx, config) {
       log.error('tools.unavailable', { reason: 'ctx.tools.register is missing; no tools registered' })
       return () => {}
     }
+    // 每次 effect 重建定义数组；旧 disposer 由本 effect 返回的清理函数统一撤销。
     const all = createToolDefinitions(pool, settings, store, runtime)
     const byName = new Map(all.map((definition) => [definition.name, definition]))
     const disposers = new Map()
@@ -3128,6 +3287,7 @@ export function apply(ctx, config) {
     // the first native_help call that names them and stay for the session.
     const resident = settings.progressiveDisclosure ? RESIDENT_TOOL_NAMES : all.map((item) => item.name)
     for (const name of resident) registerTool(name)
+    // 激活名容错：接受 "write" 与 "rust_write" 两种写法；未知名字静默忽略。
     runtime.activate = (requested) => {
       const wanted = requested.includes('all') ? DORMANT_TOOL_NAMES : requested
         .map((raw) => (String(raw).startsWith('rust_') ? String(raw) : `rust_${raw}`))
@@ -3157,6 +3317,7 @@ export function apply(ctx, config) {
     }
   }, 'rust-exec metrics and routes')
 
+  // 最后注册、最先清理：先停采样再杀池，避免拆卸过程中又产生一次采样。
   ctx.effect(() => () => {
     store.stop()
     pool.dispose()

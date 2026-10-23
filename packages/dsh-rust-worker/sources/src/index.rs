@@ -9,6 +9,18 @@
 //!   OS page cache, which the index walk just warmed.
 //! - Staleness is handled three ways: `refresh: true`, a TTL, and incremental
 //!   updates right after this worker writes or edits a file.
+//!
+//! 模块职责：为本机代码库维护一份常驻内存的轻量索引，记录每个文本文件的元数据
+//! （相对路径、大小、mtime、行数）和按正则提取的符号，供 `search_text` /
+//! `search_symbol` 在本进程内直接检索，避免每次查询都整树扫描。
+//!
+//! 核心不变量：
+//! - 索引只保存元数据和符号，从不保存文件全文，因此内存占用与文件数线性相关，
+//!   而与仓库体积无关；检索时按需重读候选文件，依赖 walk 预先预热的 page cache。
+//! - 只有 `size` 与 `mtime_ms` 同时变化才重新解析文件内容，否则直接复用缓存条目。
+//! - 磁盘缓存按 root 的规范化路径哈希绑定；换 root 不会误用旧缓存，缓存结构一旦
+//!   变化必须递增 `CACHE_VERSION`。
+//! - 全进程只有一个 root 和一份索引，统一由 `STATE` 的 Mutex 串行化访问。
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,9 +32,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+// 常量：单文件大小上限、摘要截断长度、上下文行数上限与索引默认 TTL。
+// 超过 `MAX_FILE_BYTES` 的文件在 walk 阶段就被跳过，既不进索引也不参与检索。
 const MAX_FILE_BYTES: u64 = 1_500_000;
+/// 单条命中摘要最多保留的字符数，避免超长行撑爆返回体。
 const MAX_SNIPPET_CHARS: usize = 240;
+/// `search_text` 每条命中最多附带的上下文行数（命中行上下各按其值取）。
 const MAX_CONTEXT_LINES: usize = 2;
+/// 索引快照的默认存活时间；超过后下一次检索会触发增量 refresh。
 const DEFAULT_TTL_MS: u64 = 30_000;
 /// Bumped whenever the on-disk shape of a cached entry changes.
 const CACHE_VERSION: u32 = 1;
@@ -48,6 +65,7 @@ const SYMBOL_KINDS: &[&str] = &[
     "fn", "class", "interface", "type", "const", "struct", "enum", "trait", "impl", "def", "mod",
 ];
 
+/// 单个符号：定义所在行号、种类编号（对应 `SYMBOL_KINDS` 下标）、名称与截断后的签名。
 #[derive(Clone)]
 struct Sym {
     line: u32,
@@ -56,6 +74,8 @@ struct Sym {
     sig: String,
 }
 
+/// 一个已索引文件的元数据：相对 root 的路径、大小、mtime、行数与符号列表；
+/// 同时也是磁盘缓存的最小单元，可直接序列化为 JSON。
 #[derive(Clone)]
 struct Entry {
     path: String,
@@ -65,6 +85,7 @@ struct Entry {
     syms: Vec<Sym>,
 }
 
+/// 一次构建得到的只读快照：文件列表、符号总数、构建耗时，以及复用/解析计数。
 struct Index {
     root: PathBuf,
     files: Vec<Entry>,
@@ -77,13 +98,16 @@ struct Index {
     parsed: usize,
 }
 
+/// 进程级索引状态：当前绑定的 root 与最新快照；两者都由外层 Mutex 保护。
 struct State {
     root: Option<PathBuf>,
     index: Option<Index>,
 }
 
+/// 全局唯一状态槽：首次访问时惰性初始化，之后不再替换。
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 
+/// 取全局状态的锁引用；`get_or_init` 保证内部状态只初始化一次。
 fn state() -> &'static Mutex<State> {
     STATE.get_or_init(|| {
         Mutex::new(State {
@@ -93,6 +117,7 @@ fn state() -> &'static Mutex<State> {
     })
 }
 
+/// 当前 Unix 时间戳（毫秒）；系统时钟早于 epoch 等异常情况退化为 0。
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -113,6 +138,11 @@ fn now_ms() -> u64 {
 // Cache location: `DSH_RUST_INDEX_CACHE_DIR`, else `%LOCALAPPDATA%\dsh-native\index`,
 // else the temp dir. One file per root, keyed by a hash of the canonical root path.
 
+// 中文摘要：冷构建要逐个读取文件，Windows 上首次读取（杀软过滤驱动、冷 page cache）
+// 才是主要成本；缓存为每个 root 保存“元数据 + 符号”，walk 后 size/mtime 未变即复用，
+// 使 worker 重启从全量重读降为一次 walk。
+// 缓存路径优先级：`DSH_RUST_INDEX_CACHE_DIR` > `%LOCALAPPDATA%\dsh-native\index` > 临时目录。
+/// 返回缓存目录：优先环境变量覆盖，其次 LOCALAPPDATA，最后退回系统临时目录。
 fn cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("DSH_RUST_INDEX_CACHE_DIR") {
         if !dir.trim().is_empty() {
@@ -127,22 +157,27 @@ fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("dsh-native-index")
 }
 
+/// 计算 root 的规范化字符串键：统一分隔符并转小写，与 Windows 大小写不敏感语义一致。
 /// Paths are compared case-insensitively on Windows, so the key is folded too.
 fn root_key(root: &Path) -> String {
     root.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
 }
 
+/// 由 root 键的 SHA-256 生成缓存文件名：哈希前 8 字节转十六进制，再拼上缓存版本号；
+/// root 一变文件名随之改变，天然隔离不同仓库的缓存。
 fn cache_path(root: &Path) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(root_key(root).as_bytes());
     let digest = hasher.finalize();
     let mut name = String::with_capacity(16);
+    // 只取摘要前 8 字节：足够区分不同 root，又能让文件名保持简短。
     for byte in digest.iter().take(8) {
         name.push_str(&format!("{byte:02x}"));
     }
     cache_dir().join(format!("{name}-v{CACHE_VERSION}.json"))
 }
 
+/// 把缓存条目序列化为 JSON；符号压成 `[line, kind, name, sig]` 四元组以节省空间。
 fn entry_to_json(entry: &Entry) -> Value {
     json!({
         "path": &entry.path,
@@ -153,6 +188,7 @@ fn entry_to_json(entry: &Entry) -> Value {
     })
 }
 
+/// 从缓存 JSON 还原条目；关键字段缺失或类型不符时返回 None，让该文件重新解析。
 fn entry_from_json(value: &Value) -> Option<Entry> {
     let path = value.get("path")?.as_str()?.to_string();
     let size = value.get("size")?.as_u64()?;
@@ -176,6 +212,8 @@ fn entry_from_json(value: &Value) -> Option<Entry> {
     Some(Entry { path, size, mtime_ms, lines, syms })
 }
 
+/// 读取并校验磁盘缓存：版本号或 root 键不匹配、文件缺失/损坏时统一返回空表，
+/// 调用方据此退化为全量解析，绝不复用可能过期的数据。
 fn load_cache(root: &Path) -> HashMap<String, Entry> {
     let mut out: HashMap<String, Entry> = HashMap::new();
     let Ok(bytes) = fs::read(cache_path(root)) else { return out };
@@ -196,6 +234,7 @@ fn load_cache(root: &Path) -> HashMap<String, Entry> {
     out
 }
 
+/// 把本轮回填后的完整文件列表写回磁盘；列表为空时直接跳过，避免生成空缓存。
 fn save_cache(root: &Path, files: &[Entry]) {
     if files.is_empty() {
         return;
@@ -213,12 +252,15 @@ fn save_cache(root: &Path, files: &[Entry]) {
     let Ok(bytes) = serde_json::to_vec(&body) else { return };
     let path = cache_path(root);
     let tmp = path.with_extension("tmp");
+    // 先写同目录的 .tmp 再 rename：同一卷上的 rename 近似原子，进程崩溃最多留下
+    // 一个 .tmp，读者永远不会看到写了一半的 JSON。
     // Write-then-rename so a crashed save never leaves a half-parsed cache.
     if fs::write(&tmp, &bytes).is_ok() {
         let _ = fs::rename(&tmp, &path);
     }
 }
 
+/// 解析索引根目录：优先 `DSH_RUST_INDEX_ROOT`，否则取进程当前工作目录。
 fn resolve_root() -> PathBuf {
     if let Ok(explicit) = std::env::var("DSH_RUST_INDEX_ROOT") {
         if !explicit.trim().is_empty() {
@@ -232,11 +274,13 @@ fn resolve_root() -> PathBuf {
 // symbol extraction (heuristic)
 // ---------------------------------------------------------------------------
 
+/// 一条符号规则：捕捉组 1 为符号名，`kind` 是 `SYMBOL_KINDS` 的下标。
 struct SymbolRule {
     kind: u8,
     re: &'static str,
 }
 
+/// 规则表按语言分组、按优先级排列，同一行只采纳第一条命中的规则。
 /// Patterns are anchored to the start of a trimmed line and capture the name in
 /// group 1. Order matters: earlier rules win for a given line.
 const RULES: &[SymbolRule] = &[
@@ -258,6 +302,7 @@ const RULES: &[SymbolRule] = &[
     SymbolRule { kind: 1, re: r#"^class\s+(\w+)"# },
 ];
 
+/// 预编译后的规则集合：`RegexSet` 负责一次扫描快速判定，逐条正则只在命中后执行。
 /// All symbol rules compiled twice: a `RegexSet` answers "does any rule match?"
 /// in one pass over the line (that is the hot path), and the per-rule regexes are
 /// only run on lines the set already accepted.
@@ -266,6 +311,7 @@ struct Rules {
     each: Vec<(u8, regex::Regex)>,
 }
 
+/// 惰性构造全局规则集合；规则是常量，编译失败属于编码错误，因此直接 expect 崩溃。
 fn rule_set() -> &'static Rules {
     static SET: OnceLock<Rules> = OnceLock::new();
     SET.get_or_init(|| {
@@ -279,6 +325,7 @@ fn rule_set() -> &'static Rules {
     })
 }
 
+/// 判断扩展名是否属于可索引的文本类型；无扩展名的文件一律视为非文本。
 fn is_text_ext(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => {
@@ -289,6 +336,7 @@ fn is_text_ext(path: &Path) -> bool {
     }
 }
 
+/// 按字符（而非字节）截断文本并补省略号，避免切断 UTF-8 多字节字符。
 fn cap(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max {
@@ -299,23 +347,29 @@ fn cap(text: &str, max: usize) -> String {
     out
 }
 
+/// 粗略判断二进制：只看前 8 KiB 是否含 NUL 字节，足以过滤绝大多数二进制文件。
 fn looks_binary(bytes: &[u8]) -> bool {
     let probe = &bytes[..bytes.len().min(8192)];
     probe.contains(&0)
 }
 
+/// 逐行提取符号：先用 `RegexSet` 筛掉无关行，再按规则顺序取第一条命中，每行最多
+/// 产出一个符号；注释行与超长行会被跳过。
 fn extract_symbols(text: &str) -> Vec<Sym> {
     let set = rule_set();
     let mut out: Vec<Sym> = Vec::new();
     for (idx, raw) in text.lines().enumerate() {
         let line_no = (idx + 1) as u32;
         let trimmed = raw.trim_start();
+        // 跳过空行、`//` 注释与 `#` 注释，但保留 `#!` 开头的 shebang 行。
         if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') && !trimmed.starts_with("#!") {
             continue;
         }
+        // 超长行多为压缩产物或数据行，匹配符号的意义不大。
         if trimmed.len() > 400 {
             continue;
         }
+        // `RegexSet` 只回答“有没有规则命中”，真正的捕获在下面逐条进行。
         if !set.set.is_match(trimmed) {
             continue;
         }
@@ -329,6 +383,7 @@ fn extract_symbols(text: &str) -> Vec<Sym> {
                         sig: cap(trimmed, 160),
                     });
                 }
+                // 同一行只记录第一个命中的规则，避免一个定义被重复计入。
                 break;
             }
         }
@@ -336,6 +391,7 @@ fn extract_symbols(text: &str) -> Vec<Sym> {
     out
 }
 
+/// 统计行数：按 `\n` 计数，末行无换行符时补 1；空文件也返回 1。
 fn count_lines(bytes: &[u8]) -> u32 {
     let mut n = 0u32;
     for b in bytes {
@@ -349,6 +405,7 @@ fn count_lines(bytes: &[u8]) -> u32 {
     n.max(1)
 }
 
+/// 读取文件 mtime 并转成毫秒时间戳；不可用时返回 0，会迫使该文件下次重新解析。
 fn mtime_ms(meta: &fs::Metadata) -> u64 {
     meta.modified()
         .ok()
@@ -357,7 +414,9 @@ fn mtime_ms(meta: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// 读取并解析单个文件生成缓存条目；超限、二进制或读取失败时返回 None。
 fn read_entry(root: &Path, path: &Path, meta_size: u64, meta_mtime: u64) -> Option<Entry> {
+    // 超过 `MAX_FILE_BYTES` 的文件直接放弃，避免巨型文件拖垮一次构建。
     if meta_size > MAX_FILE_BYTES {
         return None;
     }
@@ -380,8 +439,11 @@ fn read_entry(root: &Path, path: &Path, meta_size: u64, meta_mtime: u64) -> Opti
     })
 }
 
+/// 迭代遍历 root，返回 `(绝对路径, 大小, mtime_ms)`；只挑选文本文件，
+/// 跳过 `SKIP_DIRS` 里的目录和超限文件，此阶段不读取文件内容。
 fn walk(root: &Path) -> Vec<(PathBuf, u64, u64)> {
     let mut out: Vec<(PathBuf, u64, u64)> = Vec::new();
+    // 用显式栈代替递归，避免深目录树导致栈溢出。
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
@@ -405,10 +467,13 @@ fn walk(root: &Path) -> Vec<(PathBuf, u64, u64)> {
     out
 }
 
+/// 只解析缓存无法回答的文件；文件数达到 `PARALLEL_MIN_FILES` 时按线程切块并行，
+/// 结果顺序无关紧要，`build` 之后会统一按路径排序。
 /// Parse the files that the cache could not answer for, in parallel when there
 /// are enough of them. Pure CPU + `fs::read`, so threads scale cleanly; the
 /// join order of the results does not matter because `build` sorts afterwards.
 fn parse_files(root: &Path, todo: Vec<(PathBuf, u64, u64)>) -> Vec<Entry> {
+    // 线程数取可用并行度并夹在 1..=MAX_PARSE_THREADS；单线程或文件太少时直接串行。
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -419,6 +484,7 @@ fn parse_files(root: &Path, todo: Vec<(PathBuf, u64, u64)>) -> Vec<Entry> {
             .filter_map(|(path, size, mtime)| read_entry(root, &path, size, mtime))
             .collect();
     }
+    // 向上取整切块，保证最后一个线程也能分到文件；每块独立 move 进线程。
     let chunk = todo.len().div_ceil(workers);
     let mut handles = Vec::with_capacity(workers);
     let mut rest = todo;
@@ -442,6 +508,8 @@ fn parse_files(root: &Path, todo: Vec<(PathBuf, u64, u64)>) -> Vec<Entry> {
     out
 }
 
+/// 从磁盘构建一份新索引：先 walk 拿元数据，再与缓存逐条比对，size 与 mtime 都
+/// 未变的条目直接复用，其余交给 `parse_files`，最后把完整列表写回缓存。
 fn build(root: &Path) -> Index {
     let started = Instant::now();
     let walked = walk(root);
@@ -454,6 +522,8 @@ fn build(root: &Path) -> Index {
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
+        // 缓存命中要求大小与 mtime 同时相等；任一项变化就重读，宁可多解析
+        // 也不能返回已过期的符号。
         match cached.remove(&rel) {
             Some(entry) if entry.size == size && entry.mtime_ms == mtime => files.push(entry),
             _ => todo.push((path, size, mtime)),
@@ -478,6 +548,7 @@ fn build(root: &Path) -> Index {
 }
 
 impl Index {
+    /// 重新 walk 并只重读 size/mtime 变化的文件，其余条目沿用当前快照。
     /// Walk again but re-read only files whose size or mtime moved.
     fn refresh(self) -> Index {
         let started = Instant::now();
@@ -519,6 +590,7 @@ impl Index {
     }
 }
 
+/// 本 worker 写入或编辑某个文件后立刻做单文件增量更新，避免下次检索读到旧符号。
 /// Re-index one file after this worker wrote or edited it.
 pub fn note_change(path: &str) {
     let mut guard = match state().lock() {
@@ -537,6 +609,7 @@ pub fn note_change(path: &str) {
         .unwrap_or(&abs)
         .to_string_lossy()
         .replace('\\', "/");
+    // 先移除旧条目，再按当前磁盘状态重新解析后插回，保持列表按路径有序。
     index.files.retain(|entry| entry.path != rel);
     if let Ok(meta) = fs::metadata(&abs) {
         if meta.is_file() {
@@ -554,23 +627,28 @@ pub fn note_change(path: &str) {
 // soft-limit controls (host-driven, see CONCURRENCY_AND_METRICS.md §2.3)
 // ---------------------------------------------------------------------------
 
+/// 软限流开关：host 测到 CPU 超过 `cpuSoftLimitPct` 时置位，暂停后台重建。
 /// Set when the host measured CPU above `cpuSoftLimitPct`. Background refresh
 /// stops; an explicit `refresh: true` search still rebuilds, and an already
 /// built snapshot keeps serving. `exec` / `fs` are never throttled.
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// 置位暂停标记：后台刷新停止，但显式 `refresh: true` 与已构建快照不受影响。
 pub fn pause() {
     PAUSED.store(true, Ordering::SeqCst);
 }
 
+/// 清除暂停标记，恢复后台刷新能力。
 pub fn resume() {
     PAUSED.store(false, Ordering::SeqCst);
 }
 
+/// 查询当前是否处于软限流暂停状态。
 pub fn is_paused() -> bool {
     PAUSED.load(Ordering::SeqCst)
 }
 
+/// 丢弃内存索引并返回释放掉的文件/符号数量；下次检索会惰性重建，因此总是安全的。
 /// Drop the in-memory index: its file/symbol vectors dominate worker RSS, and
 /// the next search rebuilds lazily, so this is always safe to call.
 pub fn drop_index() -> Value {
@@ -589,12 +667,15 @@ pub fn drop_index() -> Value {
 }
 
 /// Make sure an index exists; rebuild/refresh according to `refresh` and the TTL.
+/// 确保索引可用：首次调用构建，之后按 `refresh` 与 TTL 决定是否增量刷新；
+/// 处于暂停状态且未显式要求刷新时，直接沿用旧快照。
 fn ensure_index(refresh: bool) -> Result<(), String> {
     let mut guard = state().lock().map_err(|_| "index state poisoned")?;
     if guard.root.is_none() {
         guard.root = Some(resolve_root());
     }
     let root = guard.root.clone().unwrap_or_else(|| PathBuf::from("."));
+    // 过期判定：没有索引，或距上次构建超过 `DEFAULT_TTL_MS`，都视为 stale。
     let stale = match &guard.index {
         None => true,
         Some(index) => now_ms().saturating_sub(index.built_at_ms) > DEFAULT_TTL_MS,
@@ -604,6 +685,7 @@ fn ensure_index(refresh: bool) -> Result<(), String> {
         return Ok(());
     }
     if PAUSED.load(Ordering::SeqCst) && !refresh {
+        // 中文补充：暂停期间不重新 walk，把 CPU 让给前台工具。
         // Soft CPU limit: serve the existing snapshot instead of re-walking.
         return Ok(());
     }
@@ -618,6 +700,7 @@ fn ensure_index(refresh: bool) -> Result<(), String> {
 // query helpers
 // ---------------------------------------------------------------------------
 
+/// 极简 glob 匹配：仅支持 `*` 与 `?`，相对路径或 basename 任一命中即算匹配。
 /// Minimal glob: `*` and `?` against the relative path and the basename.
 fn glob_match(pattern: &str, path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
@@ -625,6 +708,7 @@ fn glob_match(pattern: &str, path: &str) -> bool {
         let (mut p, mut s) = (0usize, 0usize);
         let pat: Vec<char> = pattern.chars().collect();
         let text: Vec<char> = subject.chars().collect();
+        // 双指针 + 记录最近一个 `*` 的位置，回溯时从标记处继续，避免指数级匹配。
         let (mut star, mut mark) = (usize::MAX, 0usize);
         while s < text.len() {
             if p < pat.len() && (pat[p] == '?' || pat[p] == text[s]) {
@@ -650,6 +734,7 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     matches(path) || matches(base)
 }
 
+/// 计算每行的起始字节偏移；末尾换行之后若已到文件尾，就不再追加空行。
 fn line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (idx, byte) in text.bytes().enumerate() {
@@ -660,6 +745,7 @@ fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
+/// 由字节偏移定位 1-based 行号；偏移恰好落在行首时取该行。
 /// Line number (1-based) containing `offset`, given ascending line starts.
 fn line_of(starts: &[usize], offset: usize) -> usize {
     match starts.binary_search(&offset) {
@@ -668,6 +754,7 @@ fn line_of(starts: &[usize], offset: usize) -> usize {
     }
 }
 
+/// 截取第 `line_no` 行（1-based）的文本且不含行尾换行符；越界返回空串。
 fn line_slice<'a>(text: &'a str, starts: &[usize], line_no: usize) -> &'a str {
     let idx = line_no.saturating_sub(1);
     let start = *starts.get(idx).unwrap_or(&text.len());
@@ -678,18 +765,22 @@ fn line_slice<'a>(text: &'a str, starts: &[usize], line_no: usize) -> &'a str {
     text.get(start..end.min(text.len())).unwrap_or("")
 }
 
+/// 把符号种类编号翻译成名字；越界编号统一回落为 "symbol"。
 fn sym_kind_name(kind: u8) -> &'static str {
     SYMBOL_KINDS.get(kind as usize).copied().unwrap_or("symbol")
 }
 
+/// 读取布尔参数，缺失或类型不符时视为 false。
 fn truthy(params: &Value, key: &str) -> bool {
     params.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+/// 读取无符号整数参数，缺失或类型不符时返回 None。
 fn num(params: &Value, key: &str) -> Option<u64> {
     params.get(key).and_then(|v| v.as_u64())
 }
 
+/// 读取字符串参数，缺失或类型不符时返回 None。
 fn text_param(params: &Value, key: &str) -> Option<String> {
     params
         .get(key)
@@ -701,11 +792,13 @@ fn text_param(params: &Value, key: &str) -> Option<String> {
 // methods
 // ---------------------------------------------------------------------------
 
+/// 预热：由启动线程提前构建索引，让首次检索不必等待冷构建。
 /// Build the index ahead of the first query (called from a startup thread).
 pub fn prewarm() {
     let _ = ensure_index(false);
 }
 
+/// 非阻塞地取状态快照，供 health/metrics 使用；只报告当前持有的索引，不等待构建。
 /// Non-blocking snapshot for health/metrics payloads: reports whatever the
 /// index currently holds instead of waiting for a build or refresh.
 pub fn status_value() -> Value {
@@ -729,6 +822,7 @@ pub fn status_value() -> Value {
     })
 }
 
+/// 查询索引状态：按 `refresh` 参数确保索引最新，返回文件数、符号数、TTL 与缓存路径。
 pub fn status(params: &Value) -> Result<Value, String> {
     ensure_index(truthy(params, "refresh"))?;
     let guard = state().lock().map_err(|_| "index state poisoned")?;
@@ -750,6 +844,7 @@ pub fn status(params: &Value) -> Result<Value, String> {
     }))
 }
 
+/// 文本检索：对索引内文件逐字节或按正则查找，按 rank 排序，并做条数与总字节双重截断。
 pub fn search_text(params: &Value) -> Result<Value, String> {
     let query = text_param(params, "query").ok_or("query is required")?;
     if query.trim().is_empty() {
@@ -825,10 +920,12 @@ pub fn search_text(params: &Value) -> Result<Value, String> {
                     continue;
                 }
             }
+            // 每个文件最多返回 4 条命中，避免单个热点文件挤占整个结果集。
             if seen_per_file >= 4 {
                 break;
             }
             seen_per_file += 1;
+            // rank 加权：basename 命中 +5，路径命中 +2，命中行本身是符号定义再 +4。
             let mut rank = 0i64;
             if basename_lower.contains(&query_lower) {
                 rank += 5;
@@ -900,6 +997,7 @@ pub fn search_text(params: &Value) -> Result<Value, String> {
     }))
 }
 
+/// 符号检索：只查索引内的符号表而不读文件；按名称精确/前缀/包含评分后排序截断。
 pub fn search_symbol(params: &Value) -> Result<Value, String> {
     ensure_index(truthy(params, "refresh"))?;
     let query = text_param(params, "query").map(|q| q.to_ascii_lowercase());
@@ -931,6 +1029,7 @@ pub fn search_symbol(params: &Value) -> Result<Value, String> {
         for sym in &entry.syms {
             if let Some(query) = query.as_ref() {
                 let name = sym.name.to_ascii_lowercase();
+                // rank 加权：名称完全相等 +8，前缀匹配 +5，包含匹配 +2；文件名也命中再 +2。
                 let mut rank = 0i64;
                 if name == *query {
                     rank += 8;

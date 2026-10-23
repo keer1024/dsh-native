@@ -1,3 +1,18 @@
+// dsh-native 插件客户端：浏览器侧的 React 叠加物，不持有任何会话真相。
+//
+// 职责（通过 ctx.slots 挂三个 slot，彼此独立注册）：
+//   1. settings.plugins.tab       -> RustExecPanel：配置、运行状态与「监控器」入口；
+//   2. conversation.view          -> RustConversationView（会话投影只读浏览器）；
+//   3. conversation.composer.dock -> MetricsStrip：输入框下方一行 R-Native 资源摘要。
+// 数据面：probeJson / useMetrics 轮询插件自己的 /metrics、/health、/sessions、/cache，
+// 由 readiness.phase 状态机决定何时显示占位符、何时立即补齐数据。
+//
+// 约束（改本文件时必须保持）：
+//   - 绝不调用 location.reload()：slot 由宿主热管理，刷新会丢失当前会话上下文；
+//   - 轮询必须节流：一个对话框只允许一条定时器，/sessions 隔次采、/cache 每四次采一次；
+//   - 没有数据时一律显示 `—`（见 DASH），不显示 undefined/NaN，也不假装有值；
+//   - 状态点不能只靠颜色表意，必须带 aria-label/title（见 Dot 组件）。
+//
 // Registration id must equal package.json "name" (@keer1024/dsh-native). The host keys its
 // client-graph rows by package name and re-serves a bundle whose registration id
 // does not match the row id; that second execution throws "duplicate factory
@@ -11,10 +26,12 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useEffect, useMemo, useRef, useState } = React
 
+    // API 前缀、轮询周期、曲线保留点数（1 s × 120 ≈ 最近 2 分钟）。
     const API = '/api/dsh-rust-exec'
     const POLL_MS = 1000
     const SPARK = 120
 
+    // 设置页两种语言的静态文案；语言由 pick() 在渲染时决定，这里只做数据表。
     const DICT = {
       en: {
         title: 'dsh-native worker',
@@ -78,6 +95,7 @@ window.__ModuleLoader__.load({
       },
     }
 
+    // 语义色板（跟随主题）：accent 可交互、ok 正常、warn 降级、bad 故障；监控弹窗另有一套 MONITOR_COLORS。
     const COLORS = {
       accent: '#2f81f7',
       ok: '#3fb950',
@@ -86,6 +104,7 @@ window.__ModuleLoader__.load({
       muted: 'currentColor',
     }
 
+    // 字节数 -> B/KB/MB；Number() || 0 兜住 null/NaN/字符串，保证永不输出 NaN。
     function fmtBytes(bytes) {
       const n = Number(bytes) || 0
       if (n < 1024) return n + ' B'
@@ -93,6 +112,7 @@ window.__ModuleLoader__.load({
       return (n / (1024 * 1024)).toFixed(1) + ' MB'
     }
 
+    // 毫秒 -> s / m+s / h+m 三段式；负数与非法值统一钳成 0，避免出现 "-3s"。
     function fmtDuration(ms) {
       const n = Math.max(0, Number(ms) || 0)
       const s = Math.round(n / 1000)
@@ -102,11 +122,14 @@ window.__ModuleLoader__.load({
       return Math.floor(m / 60) + 'h ' + (m % 60) + 'm'
     }
 
+    // “多久以前”；缺少时间戳时直接返回 —，调用方不必再判空。
     function ago(ms) {
       if (!ms) return '—'
       return fmtDuration(Date.now() - ms) + ' ago'
     }
 
+    // 极简 sparkline：按数据最大值等比缩放到 100×30 视口；单点数据时补 0 并按整宽取步长，
+    // 避免除零、也让曲线退化成一条水平线而不是空 path。
     function Sparkline({ points, color, label, value }) {
       const w = 100
       const hgt = 30
@@ -127,6 +150,7 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 设置页的单个指标块：label + 大号数值 + 可选提示；tone 只影响数值颜色。
     function StatCard({ label, value, hint, tone }) {
       return h('div', {
         style: {
@@ -141,6 +165,7 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 受控数字输入：onChange 统一转 Number，清空输入会得到 0（范围由 min/max 属性提示）。
     function NumberField({ label, value, step, min, max, onChange }) {
       return h('label', { style: { display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11.5, minWidth: 110, flex: '1 1 110px' } },
         h('span', { style: { opacity: 0.7 } }, label),
@@ -155,8 +180,10 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 单次 JSON GET，自带 AbortController 超时预算；监控器把多次探测折叠进同一拍。
     /** One JSON GET with its own abort budget; the monitor folds several of these into one tick. */
     async function probeJson(path, timeoutMs = 8000) {
+      // 老环境没有 AbortController 时，退化为不带超时的普通 fetch。
       const controller = typeof AbortController === 'function' ? new AbortController() : null
       const abortTimer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
       try {
@@ -175,6 +202,8 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 全文件唯一的轮询 hook：一个 tick 拉 /metrics，`withMonitorFeed` 时顺带捎上 /sessions、
+    // /health、/cache（各自节流），因此一个对话框只跑一条定时器。
     /**
      * The dialog's only poll loop. `withMonitorFeed` rides the card rows' two extra feeds on the
      * same timer: /sessions is a directory scan (every other tick) and /health is a local RPC, so
@@ -187,6 +216,7 @@ window.__ModuleLoader__.load({
         let timer = null
         let ticks = 0
         let lastPhase = null
+        // 一拍：一次 /metrics + 可选的卡片数据；retryMs 由本拍结果决定下一拍何时到来。
         const tick = async () => {
           const controller = typeof AbortController === 'function' ? new AbortController() : null
           const abortTimer = controller ? setTimeout(() => controller.abort(), 8000) : null
@@ -205,9 +235,11 @@ window.__ModuleLoader__.load({
             // A deferred start finishes a few seconds after the panel opens. The moment the
             // worker turns ready, refetch every feed at once instead of waiting out the
             // interval, so the cards fill in as soon as the backend is actually up.
+            // 只有“从非 ready 跨进 ready”才算就绪跃迁；null 表示还没拿到基线，不算。
             const phase = data?.readiness?.phase ?? null
             const becameReady = phase === 'ready' && lastPhase !== null && lastPhase !== 'ready'
             lastPhase = phase
+            // 就绪当拍把下一拍延到 0 ms：先补齐卡片，再恢复常规间隔。
             if (becameReady) retryMs = 0
             // Both card feeds are optional: a failed /sessions or /health never costs the
             // metrics ring, it only leaves the previous values (or `—`) in place.
@@ -235,6 +267,7 @@ window.__ModuleLoader__.load({
             // A 404 means the route was never mounted in this host boot: that is a
             // plugin/host seam problem, not a transient one. Say so, and stop
             // hammering the server every second while the user fixes it.
+            // 404 是装配问题而不是瞬态抖动：退避到 30 s，避免每秒打空路由。
             if (error && error.status === 404) {
               retryMs = 30000
               if (!disposed) {
@@ -251,16 +284,20 @@ window.__ModuleLoader__.load({
               setState((prev) => ({ ...prev, data: prev.data, error: error.message || String(error) }))
             }
           } finally {
+            // 无论成功失败都清掉 abort 定时器，并把下一拍挂到 retryMs 之后。
             if (abortTimer) clearTimeout(abortTimer)
             if (!disposed) timer = setTimeout(tick, retryMs)
           }
         }
         tick()
+        // 卸载时只置标志并清定时器：已发出的请求返回后会看到 disposed 而丢弃结果。
         return () => { disposed = true; if (timer) clearTimeout(timer) }
       }, [intervalMs, nonce, withMonitorFeed])
       return state
     }
 
+    // 设置页主面板：运行状态、采样摘要、worker 明细、并发限额表单，底部内嵌会话投影卡。
+    // 表单保持 draft/effective 双轨：只有用户改过 draft，Apply 才可点且不会被轮询覆盖。
     function RustExecPanel() {
       const [nonce, setNonce] = useState(0)
       const { data, error } = useMetrics(POLL_MS, nonce)
@@ -275,6 +312,7 @@ window.__ModuleLoader__.load({
       }, [data])
       const last = fast.length ? fast[fast.length - 1] : null
 
+      // 没有编辑意图时直接映射后端 config；一旦编辑就用 draft，防止每秒轮询把输入冲掉。
       const effective = draft ?? (config ? {
         maxWorkers: config.maxWorkers,
         maxInFlightPerSession: config.maxInFlightPerSession,
@@ -283,6 +321,7 @@ window.__ModuleLoader__.load({
         cpuSoftLimitPct: config.cpuSoftLimitPct,
       } : null)
 
+      // 提交整份限额；成功后清空 draft，让表单重新跟随服务端回执。
       const apply = async () => {
         if (!effective) return
         setApplyState({ status: 'applying', message: '' })
@@ -389,6 +428,8 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 只读会话投影浏览器：展开时才拉 /sessions 列表，再按游标分页拉 /session 正文；
+    // 它只渲染 Rust worker 投影出的行，会话真相仍在 DSH 自己的 jsonl 日志里。
     /**
      * Read-only session projection browser. DSH still owns the session truth
      * source; this card just renders the Rust worker's paged projection of a
@@ -404,6 +445,7 @@ window.__ModuleLoader__.load({
       const [projError, setProjError] = useState('')
       const [busy, setBusy] = useState(false)
 
+      // 拉取一页投影：reset 或切换会话时从空累积，否则把新页拼到已有消息后面。
       const loadSession = async (id, cursor, reset) => {
         setBusy(true)
         setProjError('')
@@ -430,6 +472,7 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 会话列表只拉一次：展开面板时按需加载，随后默认选中最新一条并取第一页。
       const loadList = async () => {
         setListError('')
         try {
@@ -452,6 +495,7 @@ window.__ModuleLoader__.load({
       }, [open, sessions])
 
       const timings = acc?.timings || {}
+      // 把各阶段耗时拼成一行（mode / total / decode / json / fold），缺失的阶段自动省略。
       const timingLine = acc
         ? ['mode ' + (timings.mode || '?'),
           'total ' + Math.round(timings.totalMs || 0) + ' ms',
@@ -532,12 +576,14 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 中英二选一：优先浏览器语言，拿不到就按英文处理（locale API 在此处是可选的）。
     /** Tiny bilingual picker for the View: the client locale API is optional here. */
     function pick(zh, en) {
       const lang = String((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase()
       return lang.startsWith('zh') ? zh : en
     }
 
+    // kind -> 行内前景色；未知 kind 不配色，直接继承正文色。
     const VIEW_KIND_COLORS = {
       user: COLORS.accent,
       assistant: COLORS.ok,
@@ -545,6 +591,7 @@ window.__ModuleLoader__.load({
       system: 'color-mix(in srgb, currentColor 55%, transparent)',
       reasoning: 'color-mix(in srgb, currentColor 42%, transparent)',
     }
+    // 会话视图共用的行样式与按钮样式；行高固定，虚拟滚动才能用 scrollTop 直接换算下标。
     const VIEW_ROW_STYLE = {
       display: 'flex', alignItems: 'baseline', gap: 8, padding: '2px 4px', borderRadius: 4,
       fontVariantNumeric: 'tabular-nums', borderBottom: '1px solid color-mix(in srgb, currentColor 7%, transparent)',
@@ -564,6 +611,7 @@ window.__ModuleLoader__.load({
      * view belong to the plugin and its Rust worker rather than to the host's chat renderer.
      * It is read-only: prompts are still sent from the shipped chat view.
      */
+    // 行内标记：只认 **粗体** 与 `反引号代码`，一次正则扫完，未匹配的片段原样输出。
     /**
      * Minimal markdown: fenced code blocks, bullet lines, `inline code` and **bold**.
      *
@@ -598,6 +646,7 @@ window.__ModuleLoader__.load({
       background: 'color-mix(in srgb, currentColor 9%, transparent)', fontSize: 11, lineHeight: 1.5,
     }
 
+    // 按行状态机解析：围栏之间整段塞进 <pre>，其余行攒成段落，列表前缀替换成 •。
     function renderMarkdown(text) {
       const lines = String(text ?? '').split('\n')
       const nodes = []
@@ -632,6 +681,7 @@ window.__ModuleLoader__.load({
       return nodes
     }
 
+    // 正文块：tool-call 默认折叠（点标题栏展开），其余类型的文本直接渲染；降级用 warn 色标注。
     /** One body block: prose is rendered, tool-call arguments start collapsed. */
     function BodyBlock({ block }) {
       const collapsible = block.type === 'tool-call'
@@ -654,12 +704,15 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 虚拟滚动参数：固定行高 46 px，上下各多渲染 8 行以掩盖快速滚动时的白屏。
     const VIEW_ROW_HEIGHT = 46
     const VIEW_OVERSCAN = 8
 
+    // 详情栏固定 420 px；NARROW_BREAKPOINT 为窄屏布局预留，当前宽窄由 wide 状态控制（默认宽屏）。
     const DETAIL_WIDTH = 420
     const NARROW_BREAKPOINT = 720
 
+    // kind 的展示名（[中文, 英文] 成对）；表里没有的 kind 由 kindLabel 原样返回。
     const KIND_LABELS = {
       user: ['用户', 'user'],
       assistant: ['助手', 'assistant'],
@@ -677,11 +730,13 @@ window.__ModuleLoader__.load({
     // any kind a future DSH version adds (alphabetical), so the order never drifts with load order.
     const KIND_ORDER = ['system', 'user', 'assistant', 'tool']
 
+    // 未知 kind 一律排在已知四类之后；同类之间再按字母序（见 kinds 的 localeCompare）。
     function kindRank(kind) {
       const at = KIND_ORDER.indexOf(String(kind || '').toLowerCase())
       return at < 0 ? KIND_ORDER.length : at
     }
 
+    // 子序列匹配（"tst" 命中 "test"）：空查询视为全匹配；只用于过滤，高亮走的是连续匹配。
     /** Case-insensitive subsequence match: "tst" finds "test". An empty query matches all. */
     function fuzzyMatch(needle, haystack) {
       if (!needle) return true
@@ -693,6 +748,7 @@ window.__ModuleLoader__.load({
       return at === needle.length
     }
 
+    // 只高亮连续命中的片段；仅子序列命中的行保持原文，不做逐字符标记。
     /** Highlight contiguous occurrences of the query; subsequence-only hits stay plain. */
     function Highlight({ text, query }) {
       const value = String(text == null ? '' : text)
@@ -715,6 +771,7 @@ window.__ModuleLoader__.load({
       return nodes
     }
 
+    // 会话视图主体：过滤 + 虚拟滚动 + 按需取正文，高度跟随宿主 scrollport（见下方测量 effect）。
     function RustConversationView(props) {
       const sessionId = (props && (props.sessionId || (props.session && props.session.id))) || ''
       const [rows, setRows] = useState([])
@@ -736,6 +793,7 @@ window.__ModuleLoader__.load({
       const listRef = useRef(null)
       const rootRef = useRef(null)
 
+      // 分页读投影；quiet 供 3 s 轮询使用，不显示 loading 也不打断当前选中项。
       async function load(append, quiet) {
         if (!sessionId) return
         if (!quiet) setBusy(true)
@@ -763,6 +821,7 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 点中某行才按 seq 拉正文块，避免打开视图就下载整份会话。
       async function openRow(row) {
         setSelected(row)
         setDetail({ loading: true, items: [] })
@@ -780,6 +839,7 @@ window.__ModuleLoader__.load({
       }
 
       useEffect(() => {
+        // 切换会话：重置游标并整页重载；alive 标志防止旧请求回写到新会话。
         alive.current = true
         cursor.current = 0
         if (sessionId) load(false, false)
@@ -789,6 +849,7 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         if (!sessionId) return undefined
+        // 3 s 静默增量刷新：只 append 新行，不显示 loading、不影响正在阅读的详情。
         const timer = setInterval(() => { load(true, true) }, 3000)
         return () => clearInterval(timer)
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -797,6 +858,7 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const element = listRef.current
         if (!element) return undefined
+        // 列表可视高度变化时更新虚拟滚动窗口；clientHeight 为 0 时先用 420 兜底。
         const measure = () => setViewportHeight(element.clientHeight || 420)
         measure()
         if (typeof ResizeObserver === 'function') {
@@ -807,6 +869,8 @@ window.__ModuleLoader__.load({
         return undefined
       }, [])
 
+      // 高度自适应：视图挂在宿主共享 scrollport 内，整页滚动会让表头和详情栏一起被顶走；
+      // 这里量出 scrollport 的可见高度、扣掉悬浮输入框占位，把视图钉成固定高度。
       // DSH renders plugin conversation views inside a shared resident scrollport
       // (`[data-conversation-scroll]`) whose height is auto, so `height: 100%` lets the whole tab
       // scroll and the header disappears. Measure that scrollport's visible box, reserve the
@@ -856,6 +920,7 @@ window.__ModuleLoader__.load({
           if (visible == null && typeof window.getComputedStyle === 'function') {
             declaredHeight = parseFloat(window.getComputedStyle(element).getPropertyValue('--dsh-conversation-viewport-height'))
           }
+          // 三层来源依次退化：宿主可见高度 > CSS 变量 > 视口兜底；最终不小于 240 px。
           const base = visible != null && visible > 240
             ? visible - composerInset
             : Number.isFinite(declaredHeight) && declaredHeight > 240
@@ -908,6 +973,7 @@ window.__ModuleLoader__.load({
         .map((row) => row.name)
         .filter(Boolean))].slice(0, 20), [sortedRows])
       const needle = query.trim().toLowerCase()
+      // 过滤在内存里完成：kind → tool → 模糊关键词，三者取交集，不修改原始 rows。
       const filtered = useMemo(() => sortedRows.filter((row) => {
         if (kindFilter !== 'all' && String(row.kind || '') !== kindFilter) return false
         if (toolFilter && row.name !== toolFilter) return false
@@ -931,6 +997,8 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [filterKey, rows.length])
 
+      // 只渲染 [start, end) 窗口内的行，窗口上下各留白 overscan；上下留白用等高 div 撑出
+      // 与真实列表一致的滚动条长度。
       // Windowed rendering: only the rows inside the viewport (plus overscan) reach the DOM, so a
       // 2000-message session does not create 2000 row nodes on open.
       const start = Math.max(0, Math.floor(scrollTop / VIEW_ROW_HEIGHT) - VIEW_OVERSCAN)
@@ -1073,14 +1141,17 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 监控弹窗：设置页与会话视图两个入口共用同一组件；固定一套深色色板，不跟随站点主题。
     // ---- Grafana-style performance monitor. One dialog, opened from the settings tab
     // and from the conversation view header; the old rail entries and overlay are gone.
+    // 监控面板专用色板；卡片、图表、状态点与告警色都从这里取。
     const MONITOR_COLORS = {
       bg: '#111217', panel: '#181b1f', border: 'rgba(255,255,255,0.08)',
       text: '#d8d9da', muted: '#8e9297', blue: '#3274d9', green: '#73bf69',
       orange: '#ff9830', red: '#f2495c', yellow: '#fade2a',
     }
 
+    // 数字格式化：fmtInt 四舍五入取整、非法值归 0；fmtPct 固定保留一位小数。
     const fmtInt = (value) => String(Math.round(Number(value) || 0))
     const fmtPct = (value) => (Number(value) || 0).toFixed(1) + '%'
 
@@ -1092,6 +1163,7 @@ window.__ModuleLoader__.load({
     // draws a fade over that edge and its heading shows a `+N` chip counting the hidden cards.
     // Card bodies are a two-column label-over-value grid: half the height of the old
     // one-row-per-field stack, and values keep their full text in a `title` for long paths.
+    // 卡片宽度用 clamp(196px,16.5vw,244px) 随视口伸缩；flex:0 0 auto 保证永不收缩，超出即横向滚动。
     const CARD_WIDTH = 'clamp(196px,16.5vw,244px)'
     const CARD_STYLE = {
       boxSizing: 'border-box', flex: '0 0 auto', width: CARD_WIDTH, minWidth: 0,
@@ -1104,6 +1176,7 @@ window.__ModuleLoader__.load({
       overflowX: 'auto', overflowY: 'hidden', paddingBottom: 4,
     }
 
+    // 7 px 状态灯：语义完全交给 aria-label/title，颜色只是辅助，不能只靠颜色表意。
     /** 7 px state light. Never colour-only: `label` carries the meaning for AT and hover. */
     function Dot({ on, label }) {
       return h('span', {
@@ -1119,6 +1192,8 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // 所有卡片共用的两列 label-over-value 网格（grid: repeat(2, minmax(0,1fr))），
+    // 高度约为逐字段竖排的一半；字符串值额外写 title，长路径截断后仍可悬停查看。
     /** Two-column label/value grid used by all three card kinds; rows are `[label, value]` pairs. */
     function InfoCard({ title, subtitle, rows, accent, dot }) {
       const list = Array.isArray(rows) ? rows : []
@@ -1165,6 +1240,7 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 空状态占位卡：占满整行并居中，避免空数据时整行折叠成 0 高度。
     function MutedCard({ text }) {
       return h('div', {
         style: {
@@ -1174,6 +1250,7 @@ window.__ModuleLoader__.load({
       }, text)
     }
 
+    // 不换行卡片行：横向滚动，右缘渐隐，标题旁 +N 报告被裁掉的卡片数。
     /**
      * One never-wrapping row of fixed-width cards. `items` is `[{ key, node, label }]`; an empty
      * list renders the single muted placeholder instead of an empty strip. Passing `onSelect`
@@ -1187,12 +1264,15 @@ window.__ModuleLoader__.load({
         const node = scrollerRef.current
         if (!node) return
         if (cards.length === 0) { setHidden(0); return }
+        // 被裁卡片计数：可视右缘 = scrollLeft + clientWidth，卡片右边界超过它的即算隐藏；
+        // +1 的容差吸收亚像素舍入，避免恰好贴边的卡片被误计。
         const edge = node.scrollLeft + node.clientWidth
         let clipped = 0
         for (let index = 0; index < node.children.length; index += 1) {
           const child = node.children[index]
           if (child.offsetLeft + child.offsetWidth > edge + 1) clipped += 1
         }
+        // 数量没变就复用旧值，滚动过程中避免每帧触发重渲染。
         setHidden((prev) => (prev === clipped ? prev : clipped))
       }
       useEffect(() => {
@@ -1206,6 +1286,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
           h('strong', { style: { fontSize: 12.5, color: MONITOR_COLORS.text } }, title),
           h('span', { style: { fontSize: 10.5, color: MONITOR_COLORS.muted } }, String(cards.length)),
+          // +N chip：被裁卡片数量，悬停可看到完整说明（中文/英文各一条 title）。
           hidden > 0
             ? h('span', {
               title: pick(hidden + ' 张卡片在右侧', hidden + ' more card(s) to the right'),
@@ -1222,6 +1303,7 @@ window.__ModuleLoader__.load({
             cards.length > 0
               ? cards.map((card, index) => {
                 const key = card.key == null ? index : card.key
+                // 传了 onSelect 就渲染成真按钮：可 Tab 聚焦、回车触发，aria-pressed 表达选中态。
                 const interactive = typeof onSelect === 'function'
                 const selected = interactive && Number(selectedIndex) === index
                 return h(interactive ? 'button' : 'div', {
@@ -1241,6 +1323,7 @@ window.__ModuleLoader__.load({
               })
               : h(MutedCard, { text: empty || '—' }),
           ),
+          // 右缘 48 px 渐隐遮罩：暗示右侧还有卡片；pointerEvents: none 保证不挡横向滚动。
           hidden > 0
             ? h('div', {
               style: {
@@ -1253,8 +1336,10 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 单指标卡：大数字 + min/max + sparkline，可选 ratio 进度条（内存、车道占用等）。
     function MonitorCard({ label, value, min, max, series, color, ratio, ratioMax }) {
       const values = Array.isArray(series) && series.length ? series : [0]
+      // 纵轴上限取本序列峰值，至少为 1：空序列或全 0 时也不会除零。
       const ceiling = Math.max(1, ...values.map((entry) => Number(entry) || 0))
       const width = 120
       const height = 26
@@ -1264,6 +1349,7 @@ window.__ModuleLoader__.load({
         const y = height - (Math.min(Number(entry) || 0, ceiling) / ceiling) * (height - 2) - 1
         return (index === 0 ? 'M' : 'L') + at.toFixed(2) + ' ' + y.toFixed(2)
       }).join(' ')
+      // 比值先钳到 [0,1]；没有 ratioMax 就不画进度条。
       const pct = ratio != null && ratioMax ? Math.max(0, Math.min(1, Number(ratio) / ratioMax)) : null
       return h('div', {
         'data-dsh-rust-monitor-card': label,
@@ -1302,15 +1388,20 @@ window.__ModuleLoader__.load({
     //                   sample describes the primary worker alone)
     //   GET /metrics -> optional `cache: { read: { entries, hits, misses, bytes, ttlMs },
     //                                   index: { roots, files, symbols } }`
+    // 所有「无数据」单元格统一显示长破折号，不用空串、0 或 undefined。
     const DASH = '—'
+    // numOrDash：数字或破折号——卡片字段唯一的降级入口；format 默认取整，可按需换成字节/时长。
     /** Number or the em dash: the single degradation rule every card field follows. */
     const numOrDash = (value, format = fmtInt) => (value == null || !Number.isFinite(Number(value)) ? DASH : format(Number(value)))
 
+    // 第一行：每个存活 worker 一张卡。N>1 时没有逐 worker 的 cpu/内存采样，
+    // 所以只有 pid/lanes/inflight 来自 /metrics，其余字段一律 —。
     /** Row 1: one card per live worker. With N > 1 workers the per-worker cpu/memory sample is
      * genuinely unknown, so only pid/lanes/inflight come from `/metrics` and the rest is `—`. */
     function workerCards(data, health) {
       const pool = data?.pool ?? {}
       const detail = Array.isArray(pool.workersDetail) ? pool.workersDetail : []
+      // 优先读新宿主的 workers[]，没有就退回 pool.workersDetail。
       const list = Array.isArray(data?.workers) && data.workers.length ? data.workers : detail
       // No list at all and no live pool: let the row render its muted placeholder instead.
       const workers = list.length ? list : (Number(pool.workers) > 0 || data?.last ? [{}] : [])
@@ -1362,6 +1453,8 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // 第二行：每个活跃会话一张卡，顺序沿用 /sessions 的“最新在前”；
+    // 投影详情没取到时，「投影」一栏保持 —，不猜数值。
     /** Row 2: one card per active session, newest first (that is the order `/sessions` returns).
      * Detail is honest about being unavailable: without a projection the cache cell stays `—`. */
     function sessionCards(list, details, pool) {
@@ -1415,6 +1508,8 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // 第三行：固定一张缓存卡。read/index 两块在 /metrics 里都是可选的；
+    // 索引计数缺失时退回最新采样里的 indexFiles/indexSymbols，其余保持 —。
     /** Row 3: exactly one card. Both caches are optional in `/metrics`; index counts fall back to
      * the sample the host already publishes, everything else stays `—` until it ships. */
     function cacheCard(data, live) {
@@ -1424,6 +1519,7 @@ window.__ModuleLoader__.load({
       const last = data?.last ?? null
       const num = numOrDash
       const roots = index && Array.isArray(index.roots) ? index.roots.filter(Boolean).map(String) : []
+      // 索引根可能是数组、单字符串或缺失，按形态依次降级，最终落到 —。
       const rootText = roots.length
         ? roots.join(', ')
         : index && typeof index.root === 'string' && index.root
@@ -1446,6 +1542,7 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 只为最新几条会话拉投影详情；用 size+mtime 作签名去重，日志没变就不发请求。
     /**
      * `/session` detail for the newest few sessions only, refetched when that log's size/mtime
      * changes. A cold projection decodes the whole log, so the page size is 1 and the request is
@@ -1484,6 +1581,7 @@ window.__ModuleLoader__.load({
       return details
     }
 
+    // 选中 worker 的资源曲线，紧贴在 worker 卡片行下方；缺少逐 worker 历史时用全局环代替 #0。
     /**
      * Charts for one worker, drawn directly under the worker row. The host publishes a
      * per-worker ring in `workers[i].history`; when it is empty (older host, or N workers
@@ -1543,8 +1641,10 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 三行卡片 + 曲线块的整体：弹窗只做布局，数据拼装都留在各 builder 里。
     /** The three Phase-4 rows as one block, so MonitorDialog itself stays a layout function. */
     function MonitorCardRows({ data, sessionLogs, sessionDetails, health, cache, selectedWorker, onSelectWorker, phase }) {
+      // 未就绪时卡片行只显示占位文案，不渲染一整排破折号卡片。
       const reading = phase && phase !== 'ready'
       return h(React.Fragment, null,
         h(CardRow, {
@@ -1568,17 +1668,20 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 监控弹窗：固定深色面板；Escape 或点遮罩关闭，phase 决定状态灯与标题文案。
     function MonitorDialog({ onClose }) {
       const { data, error, sessions: sessionLogs, health, cache } = useMetrics(POLL_MS, 0, true)
       const pool = data?.pool ?? null
       const extremes = data?.extremes ?? null
       // 'pending' | 'starting' | 'ready' | 'failed' from the host's readiness block. The
       // panel shows placeholders instead of a wall of dashes while the worker boots.
+      // phase 来自宿主的 readiness 块；旧宿主没有该块时，data 一到就按 ready 处理。
       const phase = data?.readiness?.phase ?? (data ? 'ready' : 'pending')
       const running = Boolean(data?.running)
       // Charts are bound to one worker; clicking a worker card switches them.
       const [selectedWorker, setSelectedWorker] = useState(0)
 
+      // 全局 Escape 关闭；onClose 变化时重新绑定，卸载时解绑。
       useEffect(() => {
         const onKey = (event) => { if (event.key === 'Escape') onClose() }
         window.addEventListener('keydown', onKey)
@@ -1611,6 +1714,7 @@ window.__ModuleLoader__.load({
             h('span', {
               style: {
                 width: 9, height: 9, borderRadius: 99, display: 'inline-block',
+                // 状态灯：ready 按 running 取绿/红，failed 红，其余（pending/starting）橙。
                 background: phase === 'ready' ? (running ? MONITOR_COLORS.green : MONITOR_COLORS.red)
                   : phase === 'failed' ? MONITOR_COLORS.red : MONITOR_COLORS.orange,
               },
@@ -1659,11 +1763,13 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 输入框下方的一行常驻资源摘要：纯文本、不可交互，拿不到采样时整条不渲染。
     function MetricsStrip() {
       const { data, error } = useMetrics(POLL_MS)
       const last = data?.history?.fast?.slice(-1)[0]
       if (!data || !last) return error ? null : null
       const rss = Math.round((last.workingSetBytes || 0) / (1024 * 1024))
+      // 数值列用 ch 固定最小宽度：否则 "0%" 变成 "100%" 会把居中的整条文本顶得左右跳。
       // Label and value are separate nodes with a fixed-width, right-aligned value: tabular digits
       // alone still change the string length ("0%" -> "100%"), which made the centred strip jump.
       const itemStyle = { display: 'inline-flex', alignItems: 'baseline', gap: 4 }
@@ -1693,6 +1799,7 @@ window.__ModuleLoader__.load({
           userSelect: 'none', flexWrap: 'wrap',
         },
       },
+        // 小圆点只是粗略提示：单核 CPU 超过 50% 转警告色，其余为正常色。
         h('span', { style: { width: 6, height: 6, borderRadius: 99, background: (last.cpuPctOneCore || 0) > 50 ? COLORS.warn : COLORS.ok, display: 'inline-block' } }),
         h('span', { style: { marginRight: 2 } }, 'R-Native'),
         ...nodes,
@@ -1702,6 +1809,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        // 三个 slot 各自 try/catch：任一 slot 缺失或契约变化，不能拖垮另外两个。
         if (!ctx.slots || typeof ctx.slots.inject !== 'function') return
         // Each registration is independent: one unavailable slot must not cost the other.
         try {

@@ -33,6 +33,26 @@ Diagnostics and the fix for `拒绝访问 (os error 5)` on `rust_write` / `rust_
 - An access-denied failure now carries an actionable hint: which image runs, at what integrity,
   and where the log is — instead of a bare `os error 5`.
 
+### Added — maintainability and packaging
+- Chinese comments across every source file (`index.js`, `client.js`, `main.rs`, `index.rs`,
+  `session.rs`, `metrics.rs`): module-level headers with the invariants, one short doc block per
+  function/struct/component, and inline notes where the logic is not obvious (timeouts, lane lease,
+  byte caps, version guard, cache TTL, readiness transitions, a11y attributes). Comments only —
+  `git diff --numstat` shows zero deleted lines.
+- `tools/build_plugin.mjs`: one command for `cargo build --release --locked` → swap
+  `packages/dsh-rust-exec/bin/dsh-rust-worker.exe` (rename-then-copy, because Windows refuses to
+  overwrite a running image) → `npm pack` → publish into the repo-root `bin/` (latest only, tracked
+  by git) and `dist/` (archive), each with a `<hash>  <name>` `.sha256`. Flags: `--skip-rust`
+  (pack the existing binary) and `--no-archive` (skip `dist/`). The version has a single source of
+  truth: `packages/dsh-rust-exec/package.json`.
+- Repo-root `bin/keer1024-dsh-native-<version>.tgz` + `.sha256`: the offline-install tarball now
+  ships with the repository instead of only in the gitignored `dist/`.
+- README: new "构建与打包（维护者）" section (§3.5), directory tree updated with `bin/` and
+  `tools/build_plugin.mjs`, plus the 1.6.0/1.6.1 behaviour that was missing from the manual
+  (8 routes incl. `/cache`, async start, `deferStart`/`startDelayMs`/`prewarmIndex`/
+  `progressiveDisclosure`/`compactReads`, `DSH_RUST_PREWARM`, monitor card rows, readiness
+  state machine).
+
 ### Known limitation
 - If a policy labels the relocated copy as well, writes stay denied; the log and the hint then
   name the path and the integrity level, which is the fastest way to tell that apart from a
