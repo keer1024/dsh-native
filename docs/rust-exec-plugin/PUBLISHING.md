@@ -73,6 +73,21 @@ npm publish --access public --otp <6 位验证码>          # 2FA 账号必须�
 - `~/.npmrc` 的 registry 可能指向 `registry.npmmirror.com`（只读镜像）；`publishConfig` 已把发布源固定到官方源，**不要**用 `--registry` 覆盖成镜像。
 - 2FA 只接受 6 位 TOTP；恢复码（recovery codes）与 `--otp` 不通用，只能在网页端重新绑定验证器或生成 Granular Token。
 
+### 2.1 GitHub Packages（仓库里 `.npmrc` 指向的通道，无需 2FA）
+
+`packages/dsh-rust-exec/.npmrc` 把 `@keer1024` 映射到 `https://npm.pkg.github.com`，所以**默认 `npm publish` 发到 GitHub Packages**：
+
+```powershell
+$env:NODE_AUTH_TOKEN = '<有 write:packages 权限的 PAT>'
+npm publish                       # 读到 .npmrc 的 scope 映射 → GitHub Packages
+```
+
+- 版本不可覆盖：每次发布必须先 bump `version` 并打 tag（`packages/dsh-rust-exec/.github/workflows/publish.yml` 在 `v*` tag 上自动跑，先校验 tag 与 `package.json` 版本一致）。
+- 安装方需要 `@keer1024:registry=https://npm.pkg.github.com` 与一个有 `read:packages` 的 token（写在 `~/.npmrc` 的 `_authToken`）。
+- 想发公共 npm 时临时覆盖 scope 的源（裸 `--registry` 对 scoped 包无效）：
+  `npm publish --@keer1024:registry=https://registry.npmjs.org --otp <6 位>`。
+- ⚠️ 该 workflow 假定 **`package.json` 在仓库根**；如果仓库像交付目录那样把包放在 `packages/dsh-rust-exec/`，要把 workflow 移到仓库根并给 `npm publish` 加 `working-directory: packages/dsh-rust-exec`，否则 tag 触发会因找不到 `./package.json` 失败。
+
 发布后立刻验证安装链路（干净 profile）：
 
 ```powershell
