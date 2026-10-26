@@ -1,4 +1,4 @@
-# dsh-native 分发与跨机安装（1.5.1 · 2026-10-23）
+# dsh-native 分发与跨机安装（1.6.2 · 2026-10-26）
 
 > 本文回答一个问题：**怎么把 `packages/dsh-rust-exec` 变成能装到另一台机器上的东西**，以及装完怎么验收、出问题怎么查。
 > 发布到 npm registry、提交插件市场见 [PUBLISHING.md](PUBLISHING.md)。1.0.0 的旧打包记录已删，历史差异看 [CHANGELOG](../../packages/dsh-rust-exec/CHANGELOG.md)。
@@ -7,14 +7,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 包名 / 版本 | `@keer1024/dsh-native@1.5.1`（worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号刻意不统一） |
-| tarball | `dist/keer1024-dsh-native-1.5.1.tgz` · **1 056 035** 字节 · 解压约 2.5 MB · 11 个文件 |
-| tarball sha256 | `52DA51DEC530F5B43194B6BCDCBDB5467BEF461FD2939A8BE5389F7FBE10CC00` |
-| 包内 exe | `bin/dsh-rust-worker.exe` · 2 276 864 B · sha256 `39C7F35DA1C9B7FA5D64F2E2F57332A7225D072CB238DEED0FDB3A0D7E7CFB76` |
-| `index.js` | 107 166 B · sha256 `DA2CCCABF87C87B5E8D11D1349F09B824C5538F6DCD2DE643718343A032E5BF6` |
-| `client.js` | 86 201 B · sha256 `89428AE09BF759CA7D3E0D0E88F749AFF6D9699F9043E9965A2D6870098B18BB` |
+| 包名 / 版本 | `@keer1024/dsh-native@1.6.2`（worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号刻意不统一） |
+| tarball | `bin/keer1024-dsh-native-1.6.2.tgz` · **1 088 625** 字节 · 11 个文件 |
+| tarball sha256 | `76BF95AC302DA77C7FAB1D315BE471A4E298D3131A40DCBF630AE5A881382424` |
+| 包内 exe | `bin/dsh-rust-worker.exe` · 2 287 104 B · sha256 `9B07BB54CA2F4E839E9BA640EC8A4E6B546D87202AD1C4261CB796E68D239E50` |
+| `index.js` | 144 968 B · sha256 `35DDDC5FC4BBCCABA2AC093F34363B91E788B77942C2E57B74579374258F87AC` |
+| `client.js` | 102 850 B · sha256 `46939893301492873FD078B3215ECDF3162692E9A33C698973E7CB0DF6B74866` |
 | 包内文件 | `package.json`、`README.md`、`LICENSE`、`CHANGELOG.md`、`index.js`、`client.js`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`bin/dsh-rust-worker.exe` |
 | 平台 | 仅 win32-x64；exe 未签名（首次运行会被 SmartScreen 拦一次）；依赖目标机自带的 Windows PowerShell 5.1 |
+
+> 旧产物在 `dist/`（1.5.1 / 1.6.0 / 1.6.1 的历史归档，已 gitignore），**只有 `bin/` 里这一份是「当前版本」**。
+> npm 上 `@keer1024/dsh-native` 目前最高发布版本是 **1.6.1**（2026-10-26 09:26 CST 发布），1.6.2 还没发布。
 
 包名三处必须一致，否则重启会出现 `web boot: 1 entry did not activate`：
 
@@ -31,9 +34,9 @@ cd C:\Users\keer_\Documents\deepseek-harness\default-workspace
 node --check packages\dsh-rust-exec\index.js
 node --check packages\dsh-rust-exec\client.js
 node tools\check_client_identity.mjs
-npm pack ./packages/dsh-rust-exec --pack-destination dist
-tar -tzf dist\keer1024-dsh-native-1.5.1.tgz        # 正好 11 个文件
-(Get-FileHash dist\keer1024-dsh-native-1.5.1.tgz -Algorithm SHA256).Hash
+npm pack ./packages/dsh-rust-exec --pack-destination bin
+tar -tzf bin\keer1024-dsh-native-1.6.2.tgz        # 正好 11 个文件
+(Get-FileHash bin\keer1024-dsh-native-1.6.2.tgz -Algorithm SHA256).Hash
 ```
 
 - `npm pack packages\dsh-rust-exec` **不带 `./`** 会被 npm 当成 GitHub 简写（`ssh://git@github.com/packages/...`）直接失败，必须写 `./packages/...`。
@@ -45,11 +48,11 @@ tar -tzf dist\keer1024-dsh-native-1.5.1.tgz        # 正好 11 个文件
 
 ### 路线 A：tarball（离线，推荐）
 
-1. 拷 `keer1024-dsh-native-1.5.1.tgz` 到目标机，例如 `C:\dsh\dist\`。
+1. 拷 `keer1024-dsh-native-1.6.2.tgz` 到目标机，例如 `C:\dsh\dist\`。
 2. 编辑 `%USERPROFILE%\.dsh\profiles\desktop\package.json`：
    ```json
    {
-     "dependencies": { "@keer1024/dsh-native": "file:C:/dsh/dist/keer1024-dsh-native-1.5.1.tgz" },
+     "dependencies": { "@keer1024/dsh-native": "file:C:/dsh/dist/keer1024-dsh-native-1.6.2.tgz" },
      "dsh": { "profile": { "bundles": [
        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@keer1024/dsh-native"
      ] } }
@@ -68,7 +71,7 @@ tar -tzf dist\keer1024-dsh-native-1.5.1.tgz        # 正好 11 个文件
 
 ### 路线 C：npm registry
 
-包名 scope 为 `@keer1024`，发布后 `dependencies` 写 `"@keer1024/dsh-native": "^1.5.1"` 即可。
+包名 scope 为 `@keer1024`，发布后 `dependencies` 写 `"@keer1024/dsh-native": "^1.6.2"` 即可。
 发布流程与 2FA 要求见 [PUBLISHING.md](PUBLISHING.md)。
 
 ## 3. 装后验收

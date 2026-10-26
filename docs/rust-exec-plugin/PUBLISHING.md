@@ -47,7 +47,7 @@ npm pack --dry-run                                  # 看清单与体积（不�
 ```jsonc
 {
   "name": "@keer1024/dsh-native",
-  "version": "1.5.1",
+  "version": "1.6.2",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/keer1024/dsh-native.git" },
   "homepage": "https://github.com/keer1024/dsh-native#readme",
@@ -110,7 +110,7 @@ description:
   en: 'dsh-native: a resident Rust worker handles command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; the host stays a thin JSON-RPC, lane-scheduling, 7-route layer. The UI adds a pinned-header projection view with fuzzy filtering and a fixed 420 px detail pane, a Grafana-style monitor with lifetime min/max and sparklines, and the R-Native resource strip.'
   zh: 'dsh-native：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 7 条 HTTP 路由。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器（生命周期 min/max + sparkline）和 R-Native 资源状态条。'
 npm: @keer1024/dsh-native   # 发了 npm 才写；否则删掉这行
-# tarball: https://github.com/keer1024/dsh-native/releases/download/v1.5.1/keer1024-dsh-native-1.5.1.tgz
+# tarball: https://github.com/keer1024/dsh-native/releases/download/v1.6.2/keer1024-dsh-native-1.6.2.tgz
 screenshots:
   - docs/rust-exec-plugin/assets/settings-tab.png
 ```
