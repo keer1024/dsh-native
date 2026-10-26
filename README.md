@@ -98,10 +98,10 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\keer1024-dsh-native-1.6.1.tgz -Algorithm SHA256
-# 与 bin\keer1024-dsh-native-1.6.1.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\keer1024-dsh-native-1.6.2.tgz -Algorithm SHA256
+# 与 bin\keer1024-dsh-native-1.6.2.tgz.sha256 里的摘要比对
 
-npm i .\bin\keer1024-dsh-native-1.6.1.tgz
+npm i .\bin\keer1024-dsh-native-1.6.2.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
