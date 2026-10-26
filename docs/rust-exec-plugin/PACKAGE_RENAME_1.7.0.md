@@ -97,8 +97,8 @@ $ node tools\check_client_identity.mjs --no-profile
 
 | 项 | 值 |
 | --- | --- |
-| tarball | `bin/dsh-native-1.7.0.tgz` · 1 088 625 B · 11 个文件 |
-| sha256 | `15e67ff101aa635bea3712719f81e14c17cb02ffb515de9b147debe30e3d5db7` |
+| tarball | `bin/dsh-native-1.7.0.tgz` · 1 089 191 B · 11 个文件 |
+| sha256 | `3f039c5f4a484ab3862fc5241e8f3a4408536148c4202aa2901c86c8a9ad0d46` |
 | worker | 与 1.6.2 同一二进制（2 287 104 B，sha `9b07bb54…`），未重建 |
 
 ## 5. 回滚
@@ -114,6 +114,8 @@ $ node tools\check_client_identity.mjs --no-profile
 ## 6. 发布状态
 
 - npm 上 `dsh-native` 目前是占位 `0.0.0-stage`，1.7.0 **尚未发布**（需要 `npm publish --otp <6位>`）。
+- `npm publish --dry-run`（2026-10-26 19:2x）已核对：`dsh-native@1.7.0`、11 个文件、包体积 1.1 MB、
+  `filename: dsh-native-1.7.0.tgz`、目标 `registry.npmjs.org` tag `latest`，清单里没有 `*.old`/`src/`/测试脚本。
 - 发布后把市场条目的 `npm:` 行写成 `dsh-native`，`tarball:` 指向
   `releases/download/v1.7.0/dsh-native-1.7.0.tgz`。
 - 发布前核对：`npm publish --dry-run` 的清单里应只有 11 个文件，且不含 `*.old`/`src/`/测试脚本。

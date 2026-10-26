@@ -8,8 +8,8 @@
 | 项 | 值 |
 | --- | --- |
 | 包名 / 版本 | `dsh-native@1.7.0`（1.7.0 起去掉 scope；worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号刻意不统一） |
-| tarball | `bin/dsh-native-1.7.0.tgz` · **1 088 625** 字节 · 11 个文件 |
-| tarball sha256 | `15E67FF101AA635BEA3712719F81E14C17CB02FFB515DE9B147DEBE30E3D5DB7` |
+| tarball | `bin/dsh-native-1.7.0.tgz` · **1 089 191** 字节 · 11 个文件 |
+| tarball sha256 | `3F039C5F4A484AB3862FC5241E8F3A4408536148C4202AA2901C86C8A9AD0D46` |
 | 包内 exe | `bin/dsh-rust-worker.exe` · 2 287 104 B · sha256 `9B07BB54CA2F4E839E9BA640EC8A4E6B546D87202AD1C4261CB796E68D239E50` |
 | `index.js` | 144 968 B · sha256 `35DDDC5FC4BBCCABA2AC093F34363B91E788B77942C2E57B74579374258F87AC` |
 | `client.js` | 102 820 B · sha256 `53FE7E8FBB4AB010B7B27678207F6122DC81372E09A38E9C1A75F2E37DC64A6B` |
