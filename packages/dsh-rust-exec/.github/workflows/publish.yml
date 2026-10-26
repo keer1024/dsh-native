@@ -1,11 +1,13 @@
 name: publish
 
-# Publishes @keer1024/dsh-native to GitHub Packages. GitHub Packages only accepts
-# scoped names whose scope equals the repository owner, and it never lets a version
-# be overwritten — so bump `version` in package.json, tag it, and let this run.
+# Publishes dsh-native (unscoped since 1.7.0) to npmjs.com.
+# npm never lets a version be overwritten — bump `version` in package.json, tag it,
+# and let this run.
 #
-# Prerequisite: this directory is the root of github.com/keer1024/dsh-native and the
-# bundled bin/dsh-rust-worker.exe is committed (the workflow does not build Rust).
+# Prerequisite: this directory is the root of github.com/keer1024/dsh-native, the
+# bundled bin/dsh-rust-worker.exe is committed (the workflow does not build Rust),
+# and the repo secret NPM_TOKEN is a Granular Access Token with "Automation" or
+# "Bypass 2FA" so `npm publish` works without an OTP prompt.
 
 on:
   push:
@@ -14,7 +16,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   publish:
@@ -25,8 +26,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@keer1024'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Tag must match package version
         shell: bash
@@ -47,4 +47,4 @@ jobs:
       - name: Publish
         run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

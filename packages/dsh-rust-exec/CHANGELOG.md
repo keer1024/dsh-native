@@ -2,6 +2,29 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.0 — 2026-10-26
+
+Package identity only: the npm name goes back to the unscoped **`dsh-native`**. No runtime, wire
+protocol, tool-schema or performance change — the worker binary and `index.js` are byte-identical to
+1.6.2.
+
+### Changed — package name drops the `@keer1024` scope
+- `package.json` `name`: `@keer1024/dsh-native` → `dsh-native`. The unscoped name was reserved by
+  this repository on npm (`0.0.0-stage`), so 1.7.0 publishes under it; the old scoped 1.6.1 stays
+  available for anyone who has not migrated.
+- The three identities move together: `package.json` `name`, `cordis.patch.yml` `id`/`name`, and the
+  `__ModuleLoader__.load({ id })` literal in `client.js`. `tools/check_client_identity.mjs` fails the
+  build if they drift.
+- `tools/build_plugin.mjs` no longer tries to rename the tarball when the package has no scope (npm
+  already emits `dsh-native-<version>.tgz`, and renaming onto itself raised ENOENT).
+
+### Migration
+- In `~/.dsh/profiles/<profile>/package.json` rename the dependency key **and** the
+  `dsh.profile.bundles` entry from `@keer1024/dsh-native` to `dsh-native`, then `pnpm install` and
+  restart DSH. Leaving the old link in `node_modules/@keer1024/` makes the client graph ambiguous;
+  `check_client_identity.mjs` reports it as `stale node_modules alias`.
+- Step-by-step, plus rollback, in [docs/rust-exec-plugin/PACKAGE_RENAME_1.7.0.md](../../docs/rust-exec-plugin/PACKAGE_RENAME_1.7.0.md).
+
 ## 1.6.2 — 2026-10-26
 
 Small-file `fs.*` throughput: the per-write cache rewrite is gone, reads stop hashing the whole

@@ -10,17 +10,11 @@ only adds display.
 ## Install
 
 ```bash
-# 1) point the @keer1024 scope at GitHub Packages (public packages still need a token
-#    with read:packages). Put these two lines in ~/.npmrc or in
-#    <DSH_HOME>/profiles/<profile>/.npmrc:
-#      @keer1024:registry=https://npm.pkg.github.com
-#      //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+# 1) install the package into your DSH profile (npmjs.com, no scope since 1.7.0)
+pnpm add dsh-native        # or: npm i dsh-native
 
-# 2) install the package into your DSH profile
-pnpm add @keer1024/dsh-native        # or: npm i @keer1024/dsh-native
-
-# 3) mount the bundle — the package ships cordis.patch.yml
-#    add "@keer1024/dsh-native" to dsh.profile.bundles in
+# 2) mount the bundle — the package ships cordis.patch.yml
+#    add "dsh-native" to dsh.profile.bundles in
 #    <DSH_HOME>/profiles/<profile>/package.json
 ```
 

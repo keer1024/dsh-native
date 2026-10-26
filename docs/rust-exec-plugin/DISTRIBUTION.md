@@ -1,23 +1,24 @@
-# dsh-native 分发与跨机安装（1.6.2 · 2026-10-26）
+# dsh-native 分发与跨机安装（1.7.0 · 2026-10-26）
 
 > 本文回答一个问题：**怎么把 `packages/dsh-rust-exec` 变成能装到另一台机器上的东西**，以及装完怎么验收、出问题怎么查。
-> 发布到 npm registry、提交插件市场见 [PUBLISHING.md](PUBLISHING.md)。1.0.0 的旧打包记录已删，历史差异看 [CHANGELOG](../../packages/dsh-rust-exec/CHANGELOG.md)。
+> 发布到 npm registry、提交插件市场见 [PUBLISHING.md](PUBLISHING.md)。1.7.0 的包名变更见 [PACKAGE_RENAME_1.7.0.md](PACKAGE_RENAME_1.7.0.md)；历史差异看 [CHANGELOG](../../packages/dsh-rust-exec/CHANGELOG.md)。
 
 ## 0. 当前产物（唯一有效记录）
 
 | 项 | 值 |
 | --- | --- |
-| 包名 / 版本 | `@keer1024/dsh-native@1.6.2`（worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号刻意不统一） |
-| tarball | `bin/dsh-native-1.6.2.tgz` · **1 088 758** 字节 · 11 个文件 |
-| tarball sha256 | `57941928EA4C4400486BAC29697F619C83676B47B2C9CEF2FEFB34EE9F708B87` |
+| 包名 / 版本 | `dsh-native@1.7.0`（1.7.0 起去掉 scope；worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号刻意不统一） |
+| tarball | `bin/dsh-native-1.7.0.tgz` · **1 088 625** 字节 · 11 个文件 |
+| tarball sha256 | `15E67FF101AA635BEA3712719F81E14C17CB02FFB515DE9B147DEBE30E3D5DB7` |
 | 包内 exe | `bin/dsh-rust-worker.exe` · 2 287 104 B · sha256 `9B07BB54CA2F4E839E9BA640EC8A4E6B546D87202AD1C4261CB796E68D239E50` |
 | `index.js` | 144 968 B · sha256 `35DDDC5FC4BBCCABA2AC093F34363B91E788B77942C2E57B74579374258F87AC` |
-| `client.js` | 102 850 B · sha256 `46939893301492873FD078B3215ECDF3162692E9A33C698973E7CB0DF6B74866` |
+| `client.js` | 102 820 B · sha256 `53FE7E8FBB4AB010B7B27678207F6122DC81372E09A38E9C1A75F2E37DC64A6B` |
 | 包内文件 | `package.json`、`README.md`、`LICENSE`、`CHANGELOG.md`、`index.js`、`client.js`、`cordis.patch.yml`、`icon.svg`、`locale/{en,zh}.json`、`bin/dsh-rust-worker.exe` |
 | 平台 | 仅 win32-x64；exe 未签名（首次运行会被 SmartScreen 拦一次）；依赖目标机自带的 Windows PowerShell 5.1 |
 
 > 旧产物在 `dist/`（1.5.1 / 1.6.0 / 1.6.1 的历史归档，已 gitignore），**只有 `bin/` 里这一份是「当前版本」**。
-> npm 上 `@keer1024/dsh-native` 目前最高发布版本是 **1.6.1**（2026-10-26 09:26 CST 发布），1.6.2 还没发布。
+> npm 上旧 scope 包 `@keer1024/dsh-native` 停在 1.6.1（2026-10-26 09:26 CST 发布）；裸名 `dsh-native`
+> 由本仓库占位（`0.0.0-stage`），1.7.0 在该名下发布。
 
 包名三处必须一致，否则重启会出现 `web boot: 1 entry did not activate`：
 
@@ -30,13 +31,13 @@
 ## 1. 打出 tarball
 
 ```powershell
-cd C:\Users\keer_\Documents\deepseek-harness\default-workspace
+cd E:\study\dsh-plugin
 node --check packages\dsh-rust-exec\index.js
 node --check packages\dsh-rust-exec\client.js
 node tools\check_client_identity.mjs
-npm pack ./packages/dsh-rust-exec --pack-destination bin
-tar -tzf bin\dsh-native-1.6.2.tgz        # 正好 11 个文件
-(Get-FileHash bin\dsh-native-1.6.2.tgz -Algorithm SHA256).Hash
+node tools\build_plugin.mjs --skip-rust --no-archive   # 或 npm pack ./packages/dsh-rust-exec --pack-destination bin
+tar -tzf bin\dsh-native-1.7.0.tgz        # 正好 11 个文件
+(Get-FileHash bin\dsh-native-1.7.0.tgz -Algorithm SHA256).Hash
 ```
 
 - `npm pack packages\dsh-rust-exec` **不带 `./`** 会被 npm 当成 GitHub 简写（`ssh://git@github.com/packages/...`）直接失败，必须写 `./packages/...`。
@@ -48,31 +49,34 @@ tar -tzf bin\dsh-native-1.6.2.tgz        # 正好 11 个文件
 
 ### 路线 A：tarball（离线，推荐）
 
-1. 拷 `dsh-native-1.6.2.tgz` 到目标机，例如 `C:\dsh\dist\`。
+1. 拷 `dsh-native-1.7.0.tgz` 到目标机，例如 `C:\dsh\dist\`。
 2. 编辑 `%USERPROFILE%\.dsh\profiles\desktop\package.json`：
    ```json
    {
-     "dependencies": { "@keer1024/dsh-native": "file:C:/dsh/dist/dsh-native-1.6.2.tgz" },
+     "dependencies": { "dsh-native": "file:C:/dsh/dist/dsh-native-1.7.0.tgz" },
      "dsh": { "profile": { "bundles": [
-       "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@keer1024/dsh-native"
+       "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-native"
      ] } }
    }
    ```
    `dependencies` 负责装包，`dsh.profile.bundles` 负责本次启动挂载 —— **两处都要有**。
 3. 在 profile 目录执行 `pnpm install`（或直接用 DSH 的插件管理页安装同一个 tarball）。
-4. `Test-Path .\node_modules\@keer1024\dsh-native\bin\dsh-rust-worker.exe` → `True`。
+4. `Test-Path .\node_modules\dsh-native\bin\dsh-rust-worker.exe` → `True`。
 5. 重启 DSH。
 
 ### 路线 B：目录 link（开发机方式，改代码即时生效）
 
 把 `packages\dsh-rust-exec` 拷到目标机，`dependencies` 写
-`"@keer1024/dsh-native": "link:C:/dsh/plugins/dsh-native"`，`bundles` 同样加 scoped 名，再 `pnpm install` + 重启。
+`"dsh-native": "link:C:/dsh/plugins/dsh-native"`，`bundles` 同样加 `"dsh-native"`，再 `pnpm install` + 重启。
 改 `index.js` 需重启；改 `client.js` 刷新页面即可。
 
 ### 路线 C：npm registry
 
-包名 scope 为 `@keer1024`，发布后 `dependencies` 写 `"@keer1024/dsh-native": "^1.6.2"` 即可。
+包名自 1.7.0 起是无 scope 的 `dsh-native`，发布后 `dependencies` 写 `"dsh-native": "^1.7.0"` 即可。
 发布流程与 2FA 要求见 [PUBLISHING.md](PUBLISHING.md)。
+
+> 从旧版升级：把 profile 里 `dependencies` 的键与 `bundles` 里的 `@keer1024/dsh-native` 同时改成
+> `dsh-native`，`pnpm install` 后重启。旧的 `@keer1024/dsh-native@1.6.1` 仍可回退使用。
 
 ## 3. 装后验收
 
@@ -90,9 +94,9 @@ tar -tzf bin\dsh-native-1.6.2.tgz        # 正好 11 个文件
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 重启后没有 `rust_*` 工具 | `dsh.profile.bundles` 缺 scoped 名（只写 `dependencies` 不够），或没跑 `pnpm install` |
+| 重启后没有 `rust_*` 工具 | `dsh.profile.bundles` 缺 `dsh-native`（只写 `dependencies` 不够），或没跑 `pnpm install` |
 | `web boot: 1 entry did not activate` / `duplicate factory registration` | 包名与注册 id 不一致；跑 `node tools/check_client_identity.mjs` |
-| `Cannot find module '@keer1024/dsh-native'` | profile 里没装依赖，回路线 A 第 3 步 |
+| `Cannot find module 'dsh-native'` | profile 里没装依赖，回路线 A 第 3 步 |
 | 工具报 `拒绝访问 (os error 5)` 写 `%TEMP%` 或 `~/.dsh` | worker 以低完整性级别运行，只能写工作区；预期限制 |
 | 首次 `exec` 3–20 秒 | PowerShell 冷启动（Defender 扫描）；之后同 lane 毫秒级，DSH 启动时已预热 |
 | SmartScreen 拦截 | exe 未签名，点「更多信息 → 仍要运行」；正式分发需代码签名 |

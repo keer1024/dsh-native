@@ -13,14 +13,14 @@
 //   - 没有数据时一律显示 `—`（见 DASH），不显示 undefined/NaN，也不假装有值；
 //   - 状态点不能只靠颜色表意，必须带 aria-label/title（见 Dot 组件）。
 //
-// Registration id must equal package.json "name" (@keer1024/dsh-native). The host keys its
+// Registration id must equal package.json "name" (dsh-native). The host keys its
 // client-graph rows by package name and re-serves a bundle whose registration id
 // does not match the row id; that second execution throws "duplicate factory
-// registration" and fails the whole web boot (crash log: "@keer1024/dsh-native: import
+// registration" and fails the whole web boot (crash log: "dsh-native: import
 // failed"). Keep this in sync with package.json — tools/check_client_identity.mjs
 // enforces it.
 window.__ModuleLoader__.load({
-  id: '@keer1024/dsh-native',
+  id: 'dsh-native',
   factory(require) {
     const React = require('react')
     const h = React.createElement

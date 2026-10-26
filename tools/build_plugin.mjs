@@ -187,7 +187,8 @@ function installWorker(version) {
  *
  * npm 会把 scope 拼进文件名（`@keer1024/dsh-native` → `keer1024-dsh-native-1.6.2.tgz`），
  * 安装包对外只叫 `dsh-native-<version>.tgz`，所以打包后立刻把 scope 前缀去掉。
- * 前缀不写死，从 package.json 的 name 推导，换 scope 也不会失效。
+ * 前缀不写死，从 package.json 的 name 推导；无 scope 的包（1.7.0 起的 `dsh-native`）
+ * npm 本来就产 `dsh-native-<version>.tgz`，这时不做改名，避免 rename 到自己报 ENOENT。
  * @param {string} version 期望版本号，用于校验产物文件名
  * @returns {string} tarball 绝对路径（仍位于宿主包目录内）
  */
@@ -205,11 +206,16 @@ function packTarball(version) {
   const pkg = JSON.parse(readFileSync(path.join(EXEC_DIR, 'package.json'), 'utf8'));
   const bare = String(pkg.name || '').split('/').pop();
   const scopePrefix = String(pkg.name || '').startsWith('@') ? `${String(pkg.name).slice(1).split('/')[0]}-` : '';
+  const produced = path.join(EXEC_DIR, `${bare}-${version}.tgz`);
+  if (!scopePrefix) {
+    // 无 scope：npm 产出的就是产线名，原地校验即可
+    if (!existsSync(produced)) throw new Error(`npm pack 未产出预期文件：${path.basename(produced)}`);
+    return produced;
+  }
   const raw = path.join(EXEC_DIR, `${scopePrefix}${bare}-${version}.tgz`);
   if (!existsSync(raw)) {
     throw new Error(`npm pack 未产出预期文件：${path.basename(raw)}`);
   }
-  const produced = path.join(EXEC_DIR, `${bare}-${version}.tgz`);
   rmSync(produced, { force: true });
   renameSync(raw, produced);
   return produced;

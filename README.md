@@ -28,11 +28,13 @@
 
 对外是 **10 个工具 + 8 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.6.2**（2026-10-26）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`，1.5.0 起以 scope 发布为 `@keer1024/dsh-native`（界面显示名仍是 `dsh-native`）；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+> 当前版本 **1.7.0**（2026-10-26）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；1.5.0–1.6.x 以 scope 发布为 `@keer1024/dsh-native`，**1.7.0 起恢复无 scope 的 `dsh-native`**；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
 >
 > 1.6.1 同时带来：worker 镜像搬到 `%LOCALAPPDATA%\dsh-native\bin`（摆脱 DSH 沙箱给工作区 exe 打的 Low IL 标签）、异步启动（DSH 先开，worker 延迟 1.2 s 拉起，`readiness` 状态机就绪后前端自动刷新）、监控器三行卡片重设计，以及本轮的**全量中文注释**与 `tools/build_plugin.mjs` 构建脚本（产物落根目录 `bin/`）。
 >
 > 1.6.2 专治**小文件**：写一次不再重写整份索引缓存（`fs.write` 索引根内 p50 17.7–47.8 ms → **4.3–6.3 ms**，双峰消失）、读窗口改为按字节切片并按 `(path,size,mtime)` 缓存摘要（84 KB 文件读 40 行 1.84 → **1.16 ms**）、`rust_stat` 支持 `paths[]` 批量、`rust_ls` 支持 `sizes:false`。起因与测量过程见 [FS_OPS_OPTIMIZATION_2026-10-26.md](docs/rust-exec-plugin/FS_OPS_OPTIMIZATION_2026-10-26.md)。
+>
+> 1.7.0 只改**包名**：`@keer1024/dsh-native` → `dsh-native`，安装包与 npm 名不再带 scope 前缀。插件 id、`cordis.patch.yml`、`client.js` 注册 id 与 profile 的 `dependencies`/`bundles` 四处必须同时改，迁移与回滚见 [PACKAGE_RENAME_1.7.0.md](docs/rust-exec-plugin/PACKAGE_RENAME_1.7.0.md)。
 
 ---
 
@@ -79,11 +81,11 @@
 
 ```powershell
 # 1) 装进 DSH profile
-pnpm add @keer1024/dsh-native     # 或 npm i @keer1024/dsh-native
+pnpm add dsh-native     # 或 npm i dsh-native
 
 # 2) 挂载 bundle —— 编辑 <DSH_HOME>\profiles\<profile>\package.json
 #    "dsh": { "profile": { "bundles": [
-#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@keer1024/dsh-native" ] } }
+#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-native" ] } }
 
 # 3) 重启 DSH，然后验收
 curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
@@ -92,16 +94,20 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 返回里能看到 `ok: true`、worker pid 和 `routes: 8`，就说明装好了；随后设置页 → 插件 → `dsh-native`
 会出现「监控器」按钮，对话页顶部会多出「R-Native 视图」页签。
 
+> 从 1.7.0 起包名是 **`dsh-native`**（不再带 scope）。老安装升级时，把 profile `package.json` 里
+> `dependencies` 的键与 `dsh.profile.bundles` 里的 `@keer1024/dsh-native` 一起改成 `dsh-native`，
+> 再 `pnpm install` + 重启；细节见 [PACKAGE_RENAME_1.7.0.md](docs/rust-exec-plugin/PACKAGE_RENAME_1.7.0.md)。
+
 ### 3.2 从 tarball 安装（离线 / 内网）
 
 仓库根目录的 `bin/` 里始终放着一份**最新**安装包（随仓库提交，带 `.sha256`）：
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\dsh-native-1.6.2.tgz -Algorithm SHA256
-# 与 bin\dsh-native-1.6.2.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\dsh-native-1.7.0.tgz -Algorithm SHA256
+# 与 bin\dsh-native-1.7.0.tgz.sha256 里的摘要比对
 
-npm i .\bin\dsh-native-1.6.2.tgz
+npm i .\bin\dsh-native-1.7.0.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -116,7 +122,7 @@ $env:DSH_PROFILE='desktop'; node tools\live_route_check.mjs   # 线上 8 条路�
 
 ### 3.4 升级与卸载
 
-- **升级**：`pnpm add @keer1024/dsh-native@latest` → 重启 DSH。exe 被占用时先 `Move-Item` 改名为 `.old`
+- **升级**：`pnpm add dsh-native@latest` → 重启 DSH。exe 被占用时先 `Move-Item` 改名为 `.old`
   （Windows 允许重命名运行中的镜像），复制新 exe，再删 `.old`。
 - **卸载**：在 DSH 插件管理里移除，或从 `dsh.profile.bundles` 删掉该条目 → 重启 DSH；
   投影缓存可以整体删除，不残留状态。
@@ -369,7 +375,7 @@ worker 镜像、完整性判定和日志路径。
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | 重启后报 `web boot: 1 entry did not activate` / `duplicate factory registration` | `package.json` 的 `name` 与 `client.js` 注册 id、`cordis.patch.yml` 不一致 | `node tools\check_client_identity.mjs` 定位；三处必须同名 |
-| 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `@keer1024/dsh-native`（只写 `dependencies` 不够） | 补 bundles + `pnpm install` + 重启 |
+| 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `dsh-native`（只写 `dependencies` 不够） | 补 bundles + `pnpm install` + 重启 |
 | 面板 401 / 404 | 浏览器没带凭据，或路由没挂上 | 看 `/health` 的 `routes.registered`；404 会退避重挂 |
 | 工具报 `拒绝访问 (os error 5)` 写 `%TEMP%` / `~/.dsh` | 旧版（≤1.6.0）worker 是低完整性进程；1.6.1 已把镜像搬到 `%LOCALAPPDATA%\dsh-native\bin` 再启动 | 先看错误里的 `[dsh-native]` 提示与 `rust_health.logPath`；仍拒绝则多半是 deny ACE / 只读 / 文件被占用 |
 | 首次 `exec` 3–20 s | 该 lane 的 PowerShell 进程冷启动 | 正常；worker 已在延迟启动窗口里预热 lane（`prewarmIndex:false` 时改为懒启动） |
@@ -417,11 +423,11 @@ reap 7/7、sweep 3/3，渲染、路由与构建脚本全绿。
 - **低完整性**：1.6.1 起 worker 从 `%LOCALAPPDATA%\dsh-native\bin` 的副本启动，不再继承 DSH
   给工作区镜像打的 Low IL 标签；若某台机器的策略把副本也打了标，日志与错误提示会指名道姓
   报出来（见排障表）。
-- **分发状态**：包名 `@keer1024/dsh-native`；GitHub 仓库 `keer1024/dsh-native`（origin 走 SSH，
-  本机已可推送，tag `v1.6.1`）。npm 上这个 scope 包还没发布成功——本机 `~\.npmrc` 里指向
-  `registry.npmjs.org` 的 token 已失效（`npm whoami` 报 `E401`），拿到新的 automation token 后
-  执行 `npm publish --registry https://registry.npmjs.org --@keer1024:registry=https://registry.npmjs.org`
-  即可。在此之前一律通过根目录 `bin/` 里的 tarball 或目录 link 分发，步骤见
+- **分发状态**：包名 `dsh-native`（1.7.0 起去掉 scope）；GitHub 仓库 `keer1024/dsh-native`（origin
+  走 SSH，本机已可推送，tag `v1.6.1`）。npm 上 `@keer1024/dsh-native@1.6.1` 是旧的 scoped 版；
+  裸名 `dsh-native` 由本仓库占位（`0.0.0-stage`），1.7.0 直接在该名下发布：
+  `npm publish --registry https://registry.npmjs.org`。发布前仍需可用的 `NODE_AUTH_TOKEN`/2FA OTP。
+  在此之前一律通过根目录 `bin/` 里的 tarball 或目录 link 分发，步骤见
   [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
 
 
@@ -476,7 +482,7 @@ dist/                        历史打包产物（tarball + sha256，已 gitigno
 - **UI** — pinned-header projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor (three card rows: workers, sessions, cache + per-worker sparkline group following the selected worker), `R-Native` resource strip
 - **Async start** — DSH boots first; the worker starts 1.2 s later (`deferStart` / `startDelayMs`) and the UI back-fills data the moment `readiness` turns `ready` (no page reload)
 - **Build / package** — `node tools/build_plugin.mjs` compiles the worker, swaps the binary, runs `npm pack` and drops the tarball + `.sha256` into the repo root `bin/` (latest only) and `dist/` (archive); `--skip-rust` and `--no-archive` for the other two modes
-- **Install** — `pnpm add @keer1024/dsh-native`, add `@keer1024/dsh-native` to `dsh.profile.bundles`, restart DSH
+- **Install** — `pnpm add dsh-native`, add `dsh-native` to `dsh.profile.bundles`, restart DSH
 - **Requires** — Windows 10/11 x64 · DSH desktop · PowerShell 5.1 (no Node.js on the target machine)
 
 See the Chinese sections above for the full manual, or read [CHANGELOG.md](packages/dsh-rust-exec/CHANGELOG.md).
