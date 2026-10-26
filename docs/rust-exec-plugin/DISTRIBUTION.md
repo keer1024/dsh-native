@@ -8,8 +8,8 @@
 | 项 | 值 |
 | --- | --- |
 | 包名 / 版本 | `@keer1024/dsh-native@1.6.2`（worker 的 `Cargo.toml` 仍是 `0.1.0`，两套版本号刻意不统一） |
-| tarball | `bin/keer1024-dsh-native-1.6.2.tgz` · **1 088 625** 字节 · 11 个文件 |
-| tarball sha256 | `76BF95AC302DA77C7FAB1D315BE471A4E298D3131A40DCBF630AE5A881382424` |
+| tarball | `bin/dsh-native-1.6.2.tgz` · **1 088 758** 字节 · 11 个文件 |
+| tarball sha256 | `57941928EA4C4400486BAC29697F619C83676B47B2C9CEF2FEFB34EE9F708B87` |
 | 包内 exe | `bin/dsh-rust-worker.exe` · 2 287 104 B · sha256 `9B07BB54CA2F4E839E9BA640EC8A4E6B546D87202AD1C4261CB796E68D239E50` |
 | `index.js` | 144 968 B · sha256 `35DDDC5FC4BBCCABA2AC093F34363B91E788B77942C2E57B74579374258F87AC` |
 | `client.js` | 102 850 B · sha256 `46939893301492873FD078B3215ECDF3162692E9A33C698973E7CB0DF6B74866` |
@@ -35,8 +35,8 @@ node --check packages\dsh-rust-exec\index.js
 node --check packages\dsh-rust-exec\client.js
 node tools\check_client_identity.mjs
 npm pack ./packages/dsh-rust-exec --pack-destination bin
-tar -tzf bin\keer1024-dsh-native-1.6.2.tgz        # 正好 11 个文件
-(Get-FileHash bin\keer1024-dsh-native-1.6.2.tgz -Algorithm SHA256).Hash
+tar -tzf bin\dsh-native-1.6.2.tgz        # 正好 11 个文件
+(Get-FileHash bin\dsh-native-1.6.2.tgz -Algorithm SHA256).Hash
 ```
 
 - `npm pack packages\dsh-rust-exec` **不带 `./`** 会被 npm 当成 GitHub 简写（`ssh://git@github.com/packages/...`）直接失败，必须写 `./packages/...`。
@@ -48,11 +48,11 @@ tar -tzf bin\keer1024-dsh-native-1.6.2.tgz        # 正好 11 个文件
 
 ### 路线 A：tarball（离线，推荐）
 
-1. 拷 `keer1024-dsh-native-1.6.2.tgz` 到目标机，例如 `C:\dsh\dist\`。
+1. 拷 `dsh-native-1.6.2.tgz` 到目标机，例如 `C:\dsh\dist\`。
 2. 编辑 `%USERPROFILE%\.dsh\profiles\desktop\package.json`：
    ```json
    {
-     "dependencies": { "@keer1024/dsh-native": "file:C:/dsh/dist/keer1024-dsh-native-1.6.2.tgz" },
+     "dependencies": { "@keer1024/dsh-native": "file:C:/dsh/dist/dsh-native-1.6.2.tgz" },
      "dsh": { "profile": { "bundles": [
        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@keer1024/dsh-native"
      ] } }

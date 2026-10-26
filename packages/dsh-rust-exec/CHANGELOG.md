@@ -32,6 +32,12 @@ file when nobody needs the digest, and stat/list gained batch and slim shapes.
   allocated a 38 KB pointer table for a 40-line window). It now counts with `memchr` and slices by
   byte offset; the cut still lands on a `\n`, so it is always on a UTF-8 boundary.
 
+### Changed — the install artifact drops the npm scope prefix
+- `npm pack` names the file after the scoped package (`keer1024-dsh-native-1.6.2.tgz`).
+  `tools/build_plugin.mjs` now renames it to **`dsh-native-<version>.tgz`** right after packing, and
+  `bin/` also gets rid of orphaned `.sha256` files left behind by the previous name.
+  The package *inside* is still `@keer1024/dsh-native`; only the filename changes.
+
 ### Measured (2026-10-26, this host, alternating old/new binaries, 40–150 runs per op)
 - `fs.write` in an indexed root: p50 **17.7–47.8 ms → 4.3–6.3 ms**; the old bimodal spikes (up to
   90 ms) disappear because there is no longer a full cache rewrite in the hot path.

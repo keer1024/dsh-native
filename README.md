@@ -98,10 +98,10 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\keer1024-dsh-native-1.6.2.tgz -Algorithm SHA256
-# 与 bin\keer1024-dsh-native-1.6.2.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\dsh-native-1.6.2.tgz -Algorithm SHA256
+# 与 bin\dsh-native-1.6.2.tgz.sha256 里的摘要比对
 
-npm i .\bin\keer1024-dsh-native-1.6.2.tgz
+npm i .\bin\dsh-native-1.6.2.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -147,7 +147,7 @@ node tools\build_plugin.mjs --no-archive    # 只更新 bin/，不往 dist/ 归�
 - 脚本**不碰 git**：不自动 commit、不自动打 tag，只在最后打印摘要。
 - 幂等：重复执行不会产生重复备份，也不会覆盖哈希不同的历史备份；`bin/` 里的旧包会被清掉，因为「项目根目录下的安装包永远是最新的」。
 - Windows 上链接器会因为 `%LOCALAPPDATA%\Temp` 的 ACL 报 `Cannot create temporary file ...: Permission denied`，脚本已把 `TMP`/`TEMP` 重定向到 `.tmp/build`（已忽略），无需手动设置。
-- 产物 `bin/keer1024-dsh-native-<版本>.tgz` 就是 §3.2 里离线安装用的那个文件。
+- 产物 `bin/dsh-native-<版本>.tgz` 就是 §3.2 里离线安装用的那个文件。
 
 ---
 
@@ -448,7 +448,7 @@ tools/                       验收与基准脚本
   bench_fs_breakdown.mjs     单操作分解基准（含原生 tmp+rename 速度标尺）
   compare_fs_runs.mjs        交错 A/B 比较，按原生标尺归一化抵消机器漂移
   smoke_worker_rpc.mjs       1.6.2 fs 语义回归（hash 三模式、stat 批量、写守卫）
-bin/                         最新安装包（keer1024-dsh-native-<版本>.tgz + .sha256，随仓库提交）
+bin/                         最新安装包（dsh-native-<版本>.tgz + .sha256，随仓库提交）
 docs/rust-exec-plugin/       设计、实测、发布、分发文档
 dist/                        历史打包产物（tarball + sha256，已 gitignore）
 ```

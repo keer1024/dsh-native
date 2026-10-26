@@ -184,6 +184,10 @@ function installWorker(version) {
  *
  * 加 --ignore-scripts：打包阶段不该触发任何生命周期脚本。
  * npm 会把 tarball 写在当前工作目录，所以调用方需要负责搬运。
+ *
+ * npm 会把 scope 拼进文件名（`@keer1024/dsh-native` → `keer1024-dsh-native-1.6.2.tgz`），
+ * 安装包对外只叫 `dsh-native-<version>.tgz`，所以打包后立刻把 scope 前缀去掉。
+ * 前缀不写死，从 package.json 的 name 推导，换 scope 也不会失效。
  * @param {string} version 期望版本号，用于校验产物文件名
  * @returns {string} tarball 绝对路径（仍位于宿主包目录内）
  */
@@ -198,10 +202,16 @@ function packTarball(version) {
   if (result.status !== 0) {
     throw new Error(`npm pack 失败（exit ${result.status}）：${(result.stderr || '').trim()}`);
   }
-  const produced = path.join(EXEC_DIR, `keer1024-dsh-native-${version}.tgz`);
-  if (!existsSync(produced)) {
-    throw new Error(`npm pack 未产出预期文件：${path.basename(produced)}`);
+  const pkg = JSON.parse(readFileSync(path.join(EXEC_DIR, 'package.json'), 'utf8'));
+  const bare = String(pkg.name || '').split('/').pop();
+  const scopePrefix = String(pkg.name || '').startsWith('@') ? `${String(pkg.name).slice(1).split('/')[0]}-` : '';
+  const raw = path.join(EXEC_DIR, `${scopePrefix}${bare}-${version}.tgz`);
+  if (!existsSync(raw)) {
+    throw new Error(`npm pack 未产出预期文件：${path.basename(raw)}`);
   }
+  const produced = path.join(EXEC_DIR, `${bare}-${version}.tgz`);
+  rmSync(produced, { force: true });
+  renameSync(raw, produced);
   return produced;
 }
 
@@ -225,6 +235,12 @@ function publish(produced, archive) {
       rmSync(path.join(BIN_DIR, entry), { force: true });
       rmSync(path.join(BIN_DIR, `${entry}.sha256`), { force: true });
     }
+  }
+  // 孤立校验文件（对应的 tarball 已不在）一并清掉，避免目录里出现两份"当前版本"的指纹
+  for (const entry of readdirSync(BIN_DIR)) {
+    if (!entry.endsWith('.tgz.sha256')) continue;
+    const owner = entry.slice(0, -'.sha256'.length);
+    if (!existsSync(path.join(BIN_DIR, owner))) rmSync(path.join(BIN_DIR, entry), { force: true });
   }
 
   const target = path.join(BIN_DIR, name);
