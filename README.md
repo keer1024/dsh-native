@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.6.1-2f6fed?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-1.6.2-2f6fed?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
@@ -28,9 +28,11 @@
 
 对外是 **10 个工具 + 8 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.6.1**（2026-10-23）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`，1.5.0 起以 scope 发布为 `@keer1024/dsh-native`（界面显示名仍是 `dsh-native`）；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+> 当前版本 **1.6.2**（2026-10-26）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`，1.5.0 起以 scope 发布为 `@keer1024/dsh-native`（界面显示名仍是 `dsh-native`）；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
 >
 > 1.6.1 同时带来：worker 镜像搬到 `%LOCALAPPDATA%\dsh-native\bin`（摆脱 DSH 沙箱给工作区 exe 打的 Low IL 标签）、异步启动（DSH 先开，worker 延迟 1.2 s 拉起，`readiness` 状态机就绪后前端自动刷新）、监控器三行卡片重设计，以及本轮的**全量中文注释**与 `tools/build_plugin.mjs` 构建脚本（产物落根目录 `bin/`）。
+>
+> 1.6.2 专治**小文件**：写一次不再重写整份索引缓存（`fs.write` 索引根内 p50 17.7–47.8 ms → **4.3–6.3 ms**，双峰消失）、读窗口改为按字节切片并按 `(path,size,mtime)` 缓存摘要（84 KB 文件读 40 行 1.84 → **1.16 ms**）、`rust_stat` 支持 `paths[]` 批量、`rust_ls` 支持 `sizes:false`。起因与测量过程见 [FS_OPS_OPTIMIZATION_2026-10-26.md](docs/rust-exec-plugin/FS_OPS_OPTIMIZATION_2026-10-26.md)。
 
 ---
 
@@ -205,8 +207,8 @@ node tools\build_plugin.mjs --no-archive    # 只更新 bin/，不往 dist/ 归�
 | `rust_read` | 读文件，按行区间取，返回 `sha256` 与总行数；同一文件同一区间的重复读会去重 | `path`、`offset`（1 起）、`limit`、`refresh` |
 | `rust_write` | 原子写（临时文件 + rename），可选版本守卫 | `path`、`content`、`expectedHash`（sha256 或 `absent`） |
 | `rust_edit` | 精确文本替换，锚点有歧义时失败且不改文件 | `path`、`oldString`、`newString`、`replaceAll` |
-| `rust_stat` | 原生 stat：大小、时间、类型 | `path` |
-| `rust_ls` | 目录列举，可限条数 | `path`、`limit` |
+| `rust_stat` | 原生 stat：大小、时间、类型；`paths` 形态一次往返探测多个路径 | `path` 或 `paths: string[]`（≤256） |
+| `rust_ls` | 目录列举，可限条数；`sizes:false` 省掉逐条 metadata | `path`、`limit`、`sizes` |
 | `rust_search` | 常驻索引上的文本/正则检索，按字节预算与相关度裁剪 | `query`、`glob`、`regex`、`symbolsOnly`、`contextLines`（0–2）、`maxHits`（默认 24）、`maxBytes`（默认 6000）、`refresh` |
 | `rust_symbols` | 符号检索（fn/class/struct/trait…），返回定义位置 | `query`、`path`、`kind`、`limit`（默认 40）、`maxBytes`、`refresh` |
 | `rust_session_open` | 直接解 `session.v*.jsonl.zstd`，游标分页，首屏只解码当前页 | `path`、`limit`（1–500，默认 50）、`cursor`、`refresh` |
@@ -340,11 +342,19 @@ worker 镜像、完整性判定和日志路径。
 | 5.5 MB 会话首屏（head 模式） | 1069 ms → **34.2 ms** | 只解码当前页 |
 | `session.body` 一页正文 | 15–25 ms | 三帧 decode/parse/read |
 | worker 握手 | ~11 ms | hello + initialize |
+| 小文件 `fs.write`（1.6.2，索引根内） | 17.7–47.8 ms → **4.3–6.3 ms** | 2026-10-26，交错 A/B，每操作 40–150 次 |
+| 小文件 `fs.read` 84 KB 读 40 行（1.6.2） | 1.84 ms → **1.16 ms** | 同上 |
+| `fs.stat` / `fs.list` / 小块读（1.6.2） | 0.8–1.8 ms，与 1.6.1 持平 | 同上，退化判据为 1.05× |
 
 2026-10-23 19:00 的定时基准（同一模拟任务双栈对比、协议层 n=12、会话层每栈 3 轮）见
 [docs/rust-exec-plugin/NATIVE_BENCH_2026-10-23.md](docs/rust-exec-plugin/NATIVE_BENCH_2026-10-23.md)：
 执行类 107×、搜索 12.7×（中位数 3.1×）、小文件读写 0.3–1.4×，同一任务工具耗时 11.75 s → 0.52 s。
 结论是「买进程启动时间和输出预算，不买文件系统吞吐」。
+
+那份基准里「小文件慢 0.3–1.4×」在 1.6.2 被追到根因并修掉，测量方法与前后对比见
+[docs/rust-exec-plugin/FS_OPS_OPTIMIZATION_2026-10-26.md](docs/rust-exec-plugin/FS_OPS_OPTIMIZATION_2026-10-26.md)：
+慢的不是文件 IO，而是「写一次文件顺手重写整份索引缓存」。现在小文件读写在 1–6 ms 区间，
+与原生工具的绝对差只剩 3–5 ms；**单文件小操作用原生 `read`/`edit` 仍然更省，没必要为 2 ms 换工具**。
 
 注意：**新建** PowerShell 进程在本机要 3–20 s（Defender + 模块首次加载，低完整性进程更慢）。
 1.6.1 起这笔钱落在「延迟启动」的后台窗口里（默认挂载后 1.2 s 拉起 worker，`readiness` 就绪即报），
@@ -435,6 +445,9 @@ tools/                       验收与基准脚本
   reset_corpus.mjs           宏任务轮次之间复位语料
   verify_low_il_fix.mjs      低完整性标签写拒绝的复现与修复验证
   plugin_worker_probe.mjs    以插件身份拉起 worker、验证搬迁与写权限
+  bench_fs_breakdown.mjs     单操作分解基准（含原生 tmp+rename 速度标尺）
+  compare_fs_runs.mjs        交错 A/B 比较，按原生标尺归一化抵消机器漂移
+  smoke_worker_rpc.mjs       1.6.2 fs 语义回归（hash 三模式、stat 批量、写守卫）
 bin/                         最新安装包（keer1024-dsh-native-<版本>.tgz + .sha256，随仓库提交）
 docs/rust-exec-plugin/       设计、实测、发布、分发文档
 dist/                        历史打包产物（tarball + sha256，已 gitignore）

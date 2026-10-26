@@ -27,7 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -258,6 +258,37 @@ fn save_cache(root: &Path, files: &[Entry]) {
     if fs::write(&tmp, &bytes).is_ok() {
         let _ = fs::rename(&tmp, &path);
     }
+}
+
+/// 缓存落盘的去抖间隔（毫秒）：写完只标脏，由唯一的后台线程合并提交。
+/// 为什么需要它：一次写入原本会同步重写整份缓存（本机 153 文件 = 45 KB，大仓库是几 MB），
+/// 连续写十个文件就是十次全量序列化 + 十次落盘，而缓存只是"下次启动别重解析"的提示。
+const CACHE_FLUSH_DEBOUNCE_MS: u64 = 500;
+
+/// 是否有尚未落盘的索引变更。
+static CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// 标记缓存为脏，并按需拉起唯一的后台落盘线程；最多每 `CACHE_FLUSH_DEBOUNCE_MS` 落一次盘。
+/// 返回 false 表示后台线程起不来，调用方应退回同步落盘——"省一次磁盘写"不能变成"永远不写缓存"。
+/// 约束：落盘失败不影响正确性——缓存缺失时下次启动退化为全量解析，绝不返回旧数据。
+fn mark_cache_dirty() -> bool {
+    CACHE_DIRTY.store(true, Ordering::SeqCst);
+    static STARTED: OnceLock<bool> = OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("index-cache-flush".to_string())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_millis(CACHE_FLUSH_DEBOUNCE_MS));
+                if !CACHE_DIRTY.swap(false, Ordering::SeqCst) {
+                    continue;
+                }
+                let Ok(guard) = state().lock() else { continue };
+                if let Some(index) = guard.index.as_ref() {
+                    save_cache(&index.root, &index.files);
+                }
+            })
+            .is_ok()
+    })
 }
 
 /// 解析索引根目录：优先 `DSH_RUST_INDEX_ROOT`，否则取进程当前工作目录。
@@ -620,7 +651,10 @@ pub fn note_change(path: &str) {
         }
     }
     index.symbols = index.files.iter().map(|f| f.syms.len()).sum();
-    save_cache(&root, &index.files);
+    // 内存里的条目已经是最新的；磁盘缓存合并到后台线程，别让一次写文件等一次全量落盘。
+    if !mark_cache_dirty() {
+        save_cache(&root, &index.files);
+    }
 }
 
 // ---------------------------------------------------------------------------

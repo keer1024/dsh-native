@@ -40,11 +40,11 @@ mod session;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -630,6 +630,67 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+// 用途：读文件摘要，按 (路径, 字节数, mtime) 命中缓存时不再重算 sha256。
+// 为什么需要它：读页脚、写前版本守卫、连续读同一个文件都在问同一个哈希，而整文件哈希
+// 在大文件上是纯开销（2400 行的 84 KB 文件每次读 40 行也要全量算一遍）。
+// 约束：缓存键不含内容，所以只有 size 与 mtime 都没变才认为内容没变——这正是缓存失效的
+// 安全边界：写一次必然改 mtime，旧条目不会再被命中。
+static HASH_CACHE: OnceLock<Mutex<HashMap<(String, u64, u64), String>>> = OnceLock::new();
+const HASH_CACHE_LIMIT: usize = 256;
+
+fn file_sha256(path: &Path, meta: Option<&fs::Metadata>, bytes: &[u8]) -> String {
+    let key = meta.and_then(|m| mtime_ms(m).map(|stamp| (path.to_string_lossy().to_string(), m.len(), stamp)));
+    let cache = HASH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(key) = key.as_ref() {
+        if let Ok(guard) = cache.lock() {
+            if let Some(hit) = guard.get(key) {
+                return hit.clone();
+            }
+        }
+    }
+    let digest = sha256_hex(bytes);
+    if let Some(key) = key {
+        if let Ok(mut guard) = cache.lock() {
+            if guard.len() >= HASH_CACHE_LIMIT {
+                guard.clear();
+            }
+            guard.insert(key, digest.clone());
+        }
+    }
+    digest
+}
+
+// 用途：数行数，语义与 `split_inclusive('\n')` 的结果长度一致：末尾没有换行时最后一段也算一行。
+// 为什么需要它：为了切 40 行而把整个文件拆成 Vec<&str> 会为每一行分配一个指针（2400 行 =
+// 一次 38 KB 的临时分配），而行号窗口只需要两次换行扫描。
+fn count_lines(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let newlines = memchr::memchr_iter(b'\n', bytes).count();
+    if bytes.ends_with(b"\n") {
+        newlines
+    } else {
+        newlines + 1
+    }
+}
+
+// 用途：返回第 `line` 行（0 起）的起始字节偏移；越界时落到文件末尾。
+// 约束：行边界必然落在 '\n' 之后，而 '\n' 是单字节，因此切点一定在 UTF-8 字符边界上。
+fn line_offset(bytes: &[u8], line: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    let mut seen = 0;
+    for pos in memchr::memchr_iter(b'\n', bytes) {
+        seen += 1;
+        if seen == line {
+            return pos + 1;
+        }
+    }
+    bytes.len()
+}
+
 // 用途：把文件 mtime 转成 Unix 毫秒时间戳；系统不支持或时间早于 epoch 时返回 None。
 fn mtime_ms(meta: &fs::Metadata) -> Option<u64> {
     meta.modified()
@@ -640,20 +701,21 @@ fn mtime_ms(meta: &fs::Metadata) -> Option<u64> {
 
 // 用途：读文件并按行窗口返回。offset 是 1 起的起始行，limit=0 表示读到文件末尾；
 // 返回内容超过 maxBytes（默认 DEFAULT_MAX_READ_BYTES）时按字节截断并置 truncatedByBytes。
-// 返回：content、总行数/总字节数、limited/truncatedByBytes 标志、mtimeMs 与整文件 sha256。
+// hash 参数控制摘要：默认 "full" 回 64 位整串（版本守卫用），"prefix" 回 16 位前缀（省 token），
+// "none" 直接不算——只想要正文时不必为整个文件付哈希成本。
+// 返回：content、总行数/总字节数、limited/truncatedByBytes 标志、mtimeMs 与 hash。
 // 约束：截断点必须落在 UTF-8 字符边界上，所以用 floor_char_boundary 而不是 String::truncate。
 fn fs_read(params: &Value) -> Result<Value, String> {
     let path = PathBuf::from(require_str(params, "path")?);
     let offset = opt_num(params, "offset").unwrap_or(1).max(1) as usize;
     let limit = opt_num(params, "limit").unwrap_or(0) as usize;
     let max_bytes = opt_num(params, "maxBytes").unwrap_or(DEFAULT_MAX_READ_BYTES as u64) as usize;
+    let hash_mode = params.get("hash").and_then(|v| v.as_str()).unwrap_or("full");
 
     let bytes = fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let meta = fs::metadata(&path).ok();
     let total_bytes = bytes.len();
-    let text = String::from_utf8_lossy(&bytes);
-    let all_lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let total_lines = all_lines.len();
+    let total_lines = count_lines(&bytes);
     // offset 是 1 起的行号，内部切片索引要减一；start 之后统一用 [start..end) 取行。
     let start = offset - 1;
     let end = if limit == 0 {
@@ -661,19 +723,22 @@ fn fs_read(params: &Value) -> Result<Value, String> {
     } else {
         (start + limit).min(total_lines)
     };
-    let mut selected = String::new();
-    if start < total_lines {
-        for line in &all_lines[start..end] {
-            selected.push_str(line);
-        }
-    }
+    // 只把窗口内的字节转成字符串：整文件拆行会把每一行都变成一个指针，2400 行的文件光这一项
+    // 就是 38 KB 的临时分配，而两次换行扫描就能定位同一段窗口。
+    let mut selected = if start < total_lines {
+        let from = line_offset(&bytes, start);
+        let to = line_offset(&bytes, end);
+        String::from_utf8_lossy(&bytes[from..to]).into_owned()
+    } else {
+        String::new()
+    };
     let mut truncated_bytes = false;
     // 按字节上限截断，切点回退到字符边界，避免把多字节 UTF-8 字符切成半个导致 panic。
     if selected.len() > max_bytes {
         selected.truncate(floor_char_boundary(&selected, max_bytes));
         truncated_bytes = true;
     }
-    Ok(json!({
+    let mut out = json!({
         "path": path.to_string_lossy(),
         "content": selected,
         "totalLines": total_lines,
@@ -682,8 +747,16 @@ fn fs_read(params: &Value) -> Result<Value, String> {
         "limited": limit != 0,
         "truncatedByBytes": truncated_bytes,
         "mtimeMs": meta.as_ref().and_then(mtime_ms),
-        "hash": sha256_hex(&bytes),
-    }))
+    });
+    match hash_mode {
+        "none" => {}
+        "prefix" => {
+            let digest = file_sha256(&path, meta.as_ref(), &bytes);
+            out["hash"] = json!(&digest[..digest.len().min(16)]);
+        }
+        _ => out["hash"] = json!(file_sha256(&path, meta.as_ref(), &bytes)),
+    }
+    Ok(out)
 }
 
 // 用途：返回不超过 index、且落在 UTF-8 字符边界上的最大下标。
@@ -732,7 +805,8 @@ fn fs_write(params: &Value) -> Result<Value, String> {
         }
     }
     if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+        // 目录通常已经存在；create_dir_all 内部先做一次 stat，这里先判一次能省掉重复探测。
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
             fs::create_dir_all(parent).map_err(|err| format!("mkdir {}: {err}", parent.display()))?;
         }
     }
@@ -799,34 +873,62 @@ fn fs_edit(params: &Value) -> Result<Value, String> {
 }
 
 // 用途：查询路径元信息（存在性、是否目录、大小、mtime）；不存在时返回 exists=false 而非错误。
+// 传 paths 数组时一次返回多条（"entries"），把 N 次一次性探测压成 1 次 RPC。
 fn fs_stat(params: &Value) -> Result<Value, String> {
-    let path = PathBuf::from(require_str(params, "path")?);
-    match fs::metadata(&path) {
-        Ok(meta) => Ok(json!({
-            "path": path.to_string_lossy(),
+    if let Some(paths) = params.get("paths").and_then(|v| v.as_array()) {
+        if paths.len() > 256 {
+            return Err("fs.stat accepts at most 256 paths per call".to_string());
+        }
+        let entries: Vec<Value> = paths
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(stat_one)
+            .collect();
+        return Ok(json!({ "entries": entries }));
+    }
+    Ok(stat_one(&require_str(params, "path")?))
+}
+
+// 用途：单个路径的元信息；路径不存在时只回 exists=false。
+fn stat_one(path: &str) -> Value {
+    let target = PathBuf::from(path);
+    match fs::metadata(&target) {
+        Ok(meta) => json!({
+            "path": path,
             "exists": true,
             "isDir": meta.is_dir(),
             "size": meta.len(),
             "mtimeMs": mtime_ms(&meta),
-        })),
-        Err(_) => Ok(json!({ "path": path.to_string_lossy(), "exists": false })),
+        }),
+        Err(_) => json!({ "path": path, "exists": false }),
     }
 }
 
 // 用途：列目录项（名称、是否目录、大小）。limit 默认 500、上限 20000，达到上限即停止遍历。
+// sizes=false 时跳过逐条 metadata：只要名字时那是 N 次多余的系统调用。
 // 约束：单层、非递归；读目录失败直接作为错误返回，单个条目的元信息缺失按默认值兜底。
 fn fs_list(params: &Value) -> Result<Value, String> {
     let path = PathBuf::from(require_str(params, "path")?);
     let max = opt_num(params, "limit").unwrap_or(500).min(20_000) as usize;
+    let with_sizes = params.get("sizes").and_then(|v| v.as_bool()).unwrap_or(true);
     let mut entries: Vec<Value> = Vec::new();
     let read_dir = fs::read_dir(&path).map_err(|err| format!("list {}: {err}", path.display()))?;
     for entry in read_dir.flatten() {
-        let meta = entry.metadata().ok();
-        entries.push(json!({
+        // sizes=true 时只取一次 metadata（既给 isDir 也给 size）；false 时退到 readdir 自带的
+        // file_type，避免为一个用不到的字节数多做一次系统调用。
+        let meta = if with_sizes { entry.metadata().ok() } else { None };
+        let is_dir = match meta.as_ref() {
+            Some(meta) => meta.is_dir(),
+            None => entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false),
+        };
+        let mut item = json!({
             "name": entry.file_name().to_string_lossy(),
-            "isDir": meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
-            "size": meta.as_ref().map(|m| m.len()).unwrap_or(0),
-        }));
+            "isDir": is_dir,
+        });
+        if let Some(meta) = meta.as_ref() {
+            item["size"] = json!(meta.len());
+        }
+        entries.push(item);
         if entries.len() >= max {
             break;
         }

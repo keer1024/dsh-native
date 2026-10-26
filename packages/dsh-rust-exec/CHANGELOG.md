@@ -2,6 +2,42 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.6.2 — 2026-10-26
+
+Small-file `fs.*` throughput: the per-write cache rewrite is gone, reads stop hashing the whole
+file when nobody needs the digest, and stat/list gained batch and slim shapes.
+
+### Fixed — a write no longer pays for a full index-cache rewrite
+- `fs.write` / `fs.edit` used to call `index::note_change`, which re-parsed the file, re-sorted the
+  table and then re-serialized the *entire* index cache to disk on every single write. On this host
+  that was 45,721 B per write; on a real repository it is megabytes. The in-memory index is still
+  updated immediately (a `search.text` right after the write finds the new symbol), but the disk
+  cache is now coalesced by a single background thread at most twice a second
+  (`CACHE_FLUSH_DEBOUNCE_MS = 500`).
+- If that thread cannot start, `mark_cache_dirty()` returns false and the caller falls back to the
+  old synchronous save — "skip one disk write" must never turn into "never persist".
+
+### Added
+- `fs.read` takes `hash: "full" | "prefix" | "none"` (default `full`). `rust_read` now asks for
+  `prefix`: the footer only ever shows 16 hex chars, and 16 chars is still a valid `expectedHash`
+  prefix for `rust_write` / `rust_edit`.
+- A digest cache keyed by `(path, size, mtime)` (256 entries, cleared when full) — repeated reads of
+  an unchanged file no longer recompute SHA-256 over the whole content.
+- `fs.stat` accepts `paths: string[]` (≤256) and answers `{ entries: [...] }` — one round-trip for a
+  fan-out of existence checks. `rust_stat` exposes it as `paths` and renders one line per path.
+- `fs.list` takes `sizes: false` to skip the per-entry `metadata()` call when only names are needed.
+
+### Changed — read windows are sliced, not split
+- `fs.read` counted and sliced lines with `Vec<&str>` over the whole file (a 2,400-line file
+  allocated a 38 KB pointer table for a 40-line window). It now counts with `memchr` and slices by
+  byte offset; the cut still lands on a `\n`, so it is always on a UTF-8 boundary.
+
+### Measured (2026-10-26, this host, alternating old/new binaries, 40–150 runs per op)
+- `fs.write` in an indexed root: p50 **17.7–47.8 ms → 4.3–6.3 ms**; the old bimodal spikes (up to
+  90 ms) disappear because there is no longer a full cache rewrite in the hot path.
+- `fs.read` of 40 lines from an 84 KB file: p50 **1.84 → 1.16 ms**.
+- `fs.stat` / `fs.list` / small reads: unchanged within noise (no regression).
+
 ## 1.6.1 — 2026-10-23
 
 Diagnostics and the fix for `拒绝访问 (os error 5)` on `rust_write` / `rust_edit` / shell writes.

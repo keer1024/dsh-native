@@ -1358,6 +1358,13 @@ function renderStat(value) {
   return `${relPath(value.path)}: file · ${value.size} B · mtime ${new Date(value.mtimeMs).toISOString()}`
 }
 
+/** 渲染批量 stat：一次调用探多个路径，一行一个，格式与单个 stat 一致。 */
+function renderStatMany(value) {
+  const entries = Array.isArray(value.entries) ? value.entries : []
+  if (entries.length === 0) return '(no paths)'
+  return entries.map(renderStat).join('\n')
+}
+
 /** 渲染目录列表：目录名带尾斜杠，文件附带字节数；空目录明确写 (empty)。 */
 function renderList(value) {
   const entries = Array.isArray(value.entries) ? value.entries : []
@@ -2092,7 +2099,7 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
         render: (_args, value) => textOf(renderRead(value)),
       },
       async execute(args, exec) {
-        const params = { path: args.path }
+        const params = { path: args.path, hash: 'prefix' }
         if (args.offset !== undefined) params.offset = args.offset
         if (args.limit !== undefined) params.limit = args.limit
         const raw = await pool.call('fs.read', params, fsTimeout(), exec?.signal, exec?.agent?.id ?? 'default')
@@ -2185,21 +2192,23 @@ function createToolDefinitions(pool, config, store, runtime = {}) {
       name: 'rust_stat',
       description:
         'Stat a path through the Rust worker: existence, file-vs-directory, size, and mtime. A '
-        + 'missing path reports exists:false instead of failing, so it also answers "does this exist?"',
+        + 'missing path reports exists:false instead of failing, so it also answers "does this exist?" '
+        + 'Pass paths[] to probe up to 256 paths in one round-trip.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Path to stat.' },
+          paths: { type: 'array', items: { type: 'string' }, description: 'Batch form: up to 256 paths, one RPC.' },
         },
-        required: ['path'],
         additionalProperties: false,
       },
       output: {
         schema: { type: 'object' },
-        render: (_args, value) => textOf(renderStat(value)),
+        render: (_args, value) => textOf(Array.isArray(value.entries) ? renderStatMany(value) : renderStat(value)),
       },
       async execute(args, exec) {
-        return pool.call('fs.stat', { path: args.path }, fsTimeout(), exec?.signal, exec?.agent?.id ?? 'default')
+        const params = Array.isArray(args.paths) ? { paths: args.paths } : { path: args.path }
+        return pool.call('fs.stat', params, fsTimeout(), exec?.signal, exec?.agent?.id ?? 'default')
       },
       isConcurrencySafe() {
         return true
