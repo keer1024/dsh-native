@@ -1,0 +1,73 @@
+name: publish
+
+# Publishes packages/dsh-rust-exec as the unscoped `dsh-native` to npmjs.
+#
+# This file must stay at the repository root: GitHub only executes workflows under
+# `.github/workflows/` at the root, so a copy inside `packages/` is inert (the
+# pre-1.7 file lived there and never ran).
+#
+# Prerequisites:
+#   - bin/dsh-rust-worker.exe is committed; this workflow does not build Rust.
+#   - Repository secret NPM_TOKEN holds a Granular Access Token with read-write
+#     on `dsh-native` (Bypass 2FA), or a classic Automation token.
+#   - `version` in packages/dsh-rust-exec/package.json is bumped first; npm never
+#     lets a version be overwritten, so a tag without a bump fails here.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Everything below runs in the package directory, so paths stay relative to it.
+defaults:
+  run:
+    working-directory: packages/dsh-rust-exec
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Tag must match the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag does not match packages/dsh-rust-exec version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Bundled worker must be committed
+        shell: bash
+        run: test -f bin/dsh-rust-worker.exe
+
+      - name: Package identity (name == patch id == client registration id)
+        shell: bash
+        # --no-profile: a CI runner has no $DSH_HOME profile to cross-check against.
+        run: node ../../tools/check_client_identity.mjs --no-profile
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          node --check index.js
+          node --check client.js
+
+      # --access public: publishConfig already says so, repeated here so a future
+      # publishConfig edit cannot silently turn this into a paid private publish.
+      # To also emit npm provenance, add `id-token: write` to permissions and
+      # append --provenance.
+      - name: Publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

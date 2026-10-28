@@ -5,12 +5,13 @@
 
 ---
 
-## 0. 先决事实（2026-10-26 核实）
+## 0. 先决事实（2026-10-22 核实，2026-10-28 按 1.7.x 更新）
 
 | 项 | 结论 |
 |---|---|
-| npm 包名 | **`dsh-native`**（1.5.0–1.6.x 用 scope `@keer1024/dsh-native`；1.7.0 起回到裸名，该名由本仓库占位持有 `0.0.0-stage`） |
-| 历史名称 | `dsh-flash` 已被第三方占用（`1.1.0`）→ 1.4.0 改名 `dsh-native` → 1.5.0 加 scope → 1.7.0 去 scope |
+| npm 包名 | **`dsh-native`**（1.7.0 起无 scope，发布到公共 npmjs；1.5.0–1.6.x 的 `@keer1024/dsh-native` 仍在 npmjs，供未迁移的用户装） |
+| 发布源 | `package.json` 的 `publishConfig.registry` 钉在 `https://registry.npmjs.org`，因此 `~/.npmrc` 指向 npmmirror 也不影响发布 |
+| 历史名称 | `dsh-flash` 已被第三方占用（`1.1.0`）→ 1.4.0 改名 `dsh-native` → 1.5.0 加 scope |
 | 发布账号 | `npm whoami` → `keer1024`；**发布要求 2FA**：`npm publish --otp <6 位>`，或用勾选 Bypass 2FA 的 Granular Access Token |
 | 市场目录仓库 | [`awesome-dsh-plugin/awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)，数据在 `data/plugins/`，一个插件一个 YAML |
 | 安装前提 | `package.json` 必须声明 `dsh.bundle.patch`（我们已有 `./cordis.patch.yml`），否则市场判为不可安装 |
@@ -19,11 +20,10 @@
 
 **包名决策**
 
-1. 当前发布名为 `dsh-native`（无 scope，`npm publish` 不需要 `--access public`）。
-2. 换名（加 scope / 改 scope / 回裸名）三处必须一起改：`package.json` 的 `name`、`cordis.patch.yml` 的
-   `name`/`id`、`client.js` 的注册 id；`tools/check_client_identity.mjs` 会把不一致直接判红 —— 半途改名会导致重启
-   `duplicate factory registration`（1.2.1 / 1.5.1 / 1.6.2→1.7.0 各踩过一次，后者见
-   [PACKAGE_RENAME_1.7.0.md](PACKAGE_RENAME_1.7.0.md)）。
+1. 当前发布名为 `dsh-native`（无 scope）；命令仍带 `--access public`，防止将来 `publishConfig` 被改坏时按私有包收费发布失败。
+2. 若要换 scope 或回到裸名，三处必须一起改：`package.json` 的 `name`、`cordis.patch.yml` 的 `name`/`id`、
+   `client.js` 的注册 id；`tools/check_client_identity.mjs` 会把不一致直接判红 —— 半途改名会导致重启
+   `duplicate factory registration`（1.2.1 与 1.5.1 各踩过一次）。
 3. 不发布 npm 也能上架：把 `npm pack` 产物挂到 GitHub Release，市场条目用 `tarball:` 指向它。
 
 市场条目里的 `name:` 用的是仓库（如 `keer/dsh-native`），与 npm 包名无关，所以改名不影响上架。
@@ -48,7 +48,7 @@ npm pack --dry-run                                  # 看清单与体积（不�
 ```jsonc
 {
   "name": "dsh-native",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/keer1024/dsh-native.git" },
   "homepage": "https://github.com/keer1024/dsh-native#readme",
@@ -60,7 +60,7 @@ npm pack --dry-run                                  # 看清单与体积（不�
 ```
 
 - `bin/dsh-rust-worker.exe` 必须与 `packages/dsh-rust-worker` 源码同版本构建（把源码与 `Cargo.lock` 一起进仓库）。
-- 体积参考：exe ≈ 2.25 MB，`npm pack` 产物 1.0–1.1 MB（gzip 后）。
+- 体积参考：exe ≈ 2.25 MB，`npm pack` 产物 1.0–1.2 MB（gzip 后）。
 - 记录 exe 的 sha256，发布说明里带上，便于用户核对。
 
 ## 2. npm 发布（维护者执行）
@@ -68,33 +68,26 @@ npm pack --dry-run                                  # 看清单与体积（不�
 ```powershell
 cd packages\dsh-rust-exec
 npm whoami --registry=https://registry.npmjs.org      # 期望 keer1024
-npm publish --otp <6 位验证码>                          # 无 scope 不再需要 --access public；2FA 账号必须带 OTP
+npm publish --access public --otp <6 位验证码>          # 2FA 账号必须带 OTP，或改用 Bypass-2FA 的 Granular Token
 ```
 
 - `~/.npmrc` 的 registry 可能指向 `registry.npmmirror.com`（只读镜像）；`publishConfig` 已把发布源固定到官方源，**不要**用 `--registry` 覆盖成镜像。
 - 2FA 只接受 6 位 TOTP；恢复码（recovery codes）与 `--otp` 不通用，只能在网页端重新绑定验证器或生成 Granular Token。
 
-### 2.1 GitHub Packages（仓库里 `.npmrc` 指向的通道，无需 2FA）
+### 2.1 自动化发布（仓库根 `.github/workflows/publish.yml`）
 
-`packages/dsh-rust-exec/.npmrc` 把 `@keer1024` 映射到 `https://npm.pkg.github.com`，所以**默认 `npm publish` 发到 GitHub Packages**：
-
-```powershell
-$env:NODE_AUTH_TOKEN = '<有 write:packages 权限的 PAT>'
-npm publish                       # 读到 .npmrc 的 scope 映射 → GitHub Packages
-```
-
-- 版本不可覆盖：每次发布必须先 bump `version` 并打 tag（`packages/dsh-rust-exec/.github/workflows/publish.yml` 在 `v*` tag 上自动跑，先校验 tag 与 `package.json` 版本一致）。
-- 安装方需要 `@keer1024:registry=https://npm.pkg.github.com` 与一个有 `read:packages` 的 token（写在 `~/.npmrc` 的 `_authToken`）。
-- 想发公共 npm 时临时覆盖 scope 的源（裸 `--registry` 对 scoped 包无效）：
-  `npm publish --@keer1024:registry=https://registry.npmjs.org --otp <6 位>`。
-- ⚠️ 该 workflow 假定 **`package.json` 在仓库根**；如果仓库像交付目录那样把包放在 `packages/dsh-rust-exec/`，要把 workflow 移到仓库根并给 `npm publish` 加 `working-directory: packages/dsh-rust-exec`，否则 tag 触发会因找不到 `./package.json` 失败。
+- workflow 必须放在**仓库根**的 `.github/workflows/`：GitHub 不执行 `packages/` 里的副本，1.6.x 时代那份就从未运行过。
+- 触发：push `v*` tag 或手动 `workflow_dispatch`；先校验 tag 去 `v` 后等于 `packages/dsh-rust-exec/package.json` 的 `version`，再跑 `check_client_identity.mjs` 与 `node --check`，最后 `npm publish --access public`。
+- 需要的仓库 secret：`NPM_TOKEN`（Granular Access Token，对 `dsh-native` 有读写权限并勾选 Bypass 2FA；classic Automation token 也可以）。
+- 版本号必须先在 `package.json` 里 bump：npm 不允许覆盖已发布版本，tag 与版本不一致会直接失败在第一步。
+- 旧 scoped 通道（GitHub Packages）已随 1.7.0 去 scope 停用：它要求 scope 与仓库 owner 同名，且不接受无 scope 名。`@keer1024/dsh-native@1.6.1` 在公共 npmjs 上仍可安装，老用户不需要 token。
 
 发布后立刻验证安装链路（干净 profile）：
 
 ```powershell
 $env:DSH_PROFILE='pubtest'   # 或在插件管理里新建测试 profile
 dsh plugin add <包名>        # 等价于插件市场的安装动作
-# 重启 DSH → 新会话里应能看到 10 个 rust_* 工具
+# 重启 DSH → 新会话里应能看到 11 个工具（5 个常驻含 native_help，6 个按需激活）
 # 浏览器刷新一次 → 设置页出现 dsh-native 标签页 + 「监控器」按钮
 dsh plugin remove <包名>     # 再装回，确认可卸载、可重装
 ```
@@ -110,8 +103,8 @@ category: tools
 description:
   en: 'dsh-native: a resident Rust worker handles command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; the host stays a thin JSON-RPC, lane-scheduling, 7-route layer. The UI adds a pinned-header projection view with fuzzy filtering and a fixed 420 px detail pane, a Grafana-style monitor with lifetime min/max and sparklines, and the R-Native resource strip.'
   zh: 'dsh-native：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 7 条 HTTP 路由。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器（生命周期 min/max + sparkline）和 R-Native 资源状态条。'
-npm: dsh-native   # 发了 npm 才写；否则删掉这行
-# tarball: https://github.com/keer1024/dsh-native/releases/download/v1.7.0/dsh-native-1.7.0.tgz
+npm: @keer1024/dsh-native   # 发了 npm 才写；否则删掉这行
+# tarball: https://github.com/keer1024/dsh-native/releases/download/v1.5.1/keer1024-dsh-native-1.5.1.tgz
 screenshots:
   - docs/rust-exec-plugin/assets/settings-tab.png
 ```

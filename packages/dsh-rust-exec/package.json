@@ -32,6 +32,10 @@
       ]
     }
   },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.1"
+  },
   "files": [
     "index.js",
     "client.js",
@@ -48,7 +52,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/keer1024/dsh-native.git"
+    "url": "git+https://github.com/keer1024/dsh-native.git",
+    "directory": "packages/dsh-rust-exec"
   },
   "homepage": "https://github.com/keer1024/dsh-native#readme",
   "bugs": {
@@ -64,6 +69,7 @@
     "x64"
   ],
   "publishConfig": {
+    "registry": "https://registry.npmjs.org",
     "access": "public"
   }
 }

@@ -1,0 +1,24 @@
+# awesome-dsh-plugin 条目（待提交）
+#
+# 用法：把本文件复制到 awesome-dsh-plugin 仓库的
+#   data/plugins/keer1024__dsh-native--packages-dsh-rust-exec.yml
+# 然后开 PR（标题如 "Add keer1024/dsh-native"），不要手改任何 README。
+#
+# 提交前还差三步（都在 GitHub / npm 一侧，见 PUBLISHING.md §2）：
+#   1. 把 packages/dsh-rust-exec 的版本 bump 后发到公共 npmjs（当前 npm 上只有占位 0.0.0-stage）
+#   2. 仓库 keer1024/dsh-native 加 topic `dsh-plugin`
+#   3. description 里的数字/工具名再对一眼代码，CI 会核对
+
+url: 'https://github.com/keer1024/dsh-native/tree/main/packages/dsh-rust-exec'
+name: 'keer1024/dsh-native#packages/dsh-rust-exec'
+category: 'tools'
+description:
+  en: 'Resident Rust sidecar for Windows that folds shell-heavy tool calls into one warm worker: 11 tools (5 always on, 6 activated on demand) for command execution, sha256-guarded file reads and writes, code indexing and search, session-log projection and resource sampling, served by a lane pool with soft RSS and CPU limits over 8 HTTP routes.'
+  zh: 'Windows 上的常驻 Rust 伴生进程，把散落的 shell 调用收进一个暖 worker：11 个工具（5 个常驻、6 个按需激活）覆盖命令执行、带 sha256 校验的文件读写、代码索引与搜索、会话日志投影与资源采样，由带通道池和 RSS/CPU 软限额的 worker 提供，并暴露 8 条 HTTP 路由。'
+# icon: 省略则市场回退到仓库所有者头像。仓库里只有 icon.svg，市场只收位图，
+#       若要自定义请放一张约 96px 的方形 png/webp 到 GitHub 上再填 https 绝对地址。
+#
+# tarball: 可选。不发布 npm 时才需要指 GitHub Release 的 .tgz；发布到 npm 后
+#          市场会自动按 registry 元数据安装，不要手写 npm: 字段（会被校验拒绝）。
+#
+# 截图不在这里声明：见 packages/dsh-rust-exec/screenshots.json（1-8 张）。

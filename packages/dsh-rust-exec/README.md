@@ -10,8 +10,9 @@ only adds display.
 ## Install
 
 ```bash
-# 1) install the package into your DSH profile (npmjs.com, no scope since 1.7.0)
-pnpm add dsh-native        # or: npm i dsh-native
+# 1) install into a DSH profile — public npmjs, unscoped since 1.7.0
+dsh plugin --profile desktop add dsh-native
+#    same thing: pnpm add dsh-native inside <DSH_HOME>/profiles/<profile>
 
 # 2) mount the bundle — the package ships cordis.patch.yml
 #    add "dsh-native" to dsh.profile.bundles in
