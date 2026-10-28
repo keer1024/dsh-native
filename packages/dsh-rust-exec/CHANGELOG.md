@@ -2,6 +2,35 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.3 — 2026-10-28
+
+Report-only release: the monitor dialog gains a savings row. No tool schema, wire-protocol, route or
+worker-binary change.
+
+### Added — savings row in the monitor dialog
+- `MetricsStore.savingsSnapshot()` reports one object in `/metrics.savings`:
+  `fixedPerTurn = 1812 − 719 = 1093`, `turns` (summed from the newest session logs), `calls` and
+  `byTool` (model-facing tool calls only), `callTokens`, `savedTokens`, `savedSeconds`,
+  `outputTokPerSec`, `indexBaselineMs`, `perCall`, `basis: 'lower-bound'` and the per-session rows.
+- The per-call table (`read 33 / write 26 / edit 22 / stat 31 / exec 13`) is the measured difference
+  between the 1.4.1 renderer and the current one, recorded in the plan's §3.1/§3.5; tools that were
+  never calibrated (`ls`, `search`, `symbols`, `session_open`, `health`) count as 0 instead of being
+  guessed. Provider-side cache hit rate and model p95 are deliberately **not** reported: the host
+  cannot observe them, and a fabricated number is worse than a missing one.
+- `WorkerPool` counts calls per tool (`#sessionStats[].byTool`) and refreshes `turns` from the newest
+  five session logs at most every 30 s, cached by `id:size:mtimeMs`; `index.status`, `session.open`
+  and metrics sampling are host-internal and never counted as model calls.
+- `client.js` renders a `savings` row after the cache row: four cards (per-request fixed saving,
+  tokens saved so far, estimated time saved, index speedup), a stacked bar of per-tool savings and a
+  three-row session table. Estimated values carry an `est` badge; missing fields render `—`.
+
+### Verified
+- `node tools/monitor_render_test.mjs` — all checks pass, 0 failures (6 new savings assertions plus a
+  degrade path with no `savings` payload).
+- `node tools/check_client_identity.mjs` — 20/20; `node _native/measure/harness.mjs` — 11 tools, 0
+  failures; `_native/measure/savings_probe.mjs` — `/metrics.savings` = `fixedPerTurn 1093, turns 65,
+  basis lower-bound`.
+
 ## 1.7.2 — 2026-10-28
 
 Monitor presentation only: the dialog gets shorter and the session card's "last call" cell can now

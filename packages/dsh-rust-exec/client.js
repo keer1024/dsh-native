@@ -1700,6 +1700,167 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 第四行：节省报表（§15）。所有数字来自宿主 `/metrics.savings`（常量表 × 真实计数），
+    // 只有「估算省时」是折算值，所以它单独挂 est 徽章；缺字段一律 —，不猜。
+    /**
+     * Savings report: fixed per-request saving (measured constants) + per-call saving
+     * (measured deltas × real call counts), a contribution bar and the newest sessions.
+     * Everything is a lower bound; only the seconds figure is an estimate and carries `est`.
+     */
+    function savingsRow(data, cache) {
+      const savings = data?.savings ?? null
+      const num = numOrDash
+      const kNum = (value) => {
+        const n = Number(value)
+        if (value == null || !Number.isFinite(n)) return DASH
+        if (Math.abs(n) < 1000) return fmtInt(n)
+        return n >= 10000 ? Math.round(n / 1000) + 'k' : (n / 1000).toFixed(1) + 'k'
+      }
+      // 徽章只有一份文案：估算 = 用吐字速率折算出来的秒数，不是实测耗时。
+      const est = (title) => h('span', {
+        'data-dsh-est': 'savings',
+        title,
+        style: {
+          fontSize: 8.5, lineHeight: '10px', padding: '1px 4px', borderRadius: 3,
+          border: '1px solid ' + MONITOR_COLORS.border, color: MONITOR_COLORS.muted,
+          textTransform: 'uppercase', letterSpacing: 0.3, whiteSpace: 'nowrap',
+        },
+      }, 'est')
+      const fixed = savings?.fixedPerTurn ?? (savings ? 1093 : null)
+      const baseline = savings?.baselinePerTurn ?? null
+      const resident = savings?.residentPerTurn ?? null
+      const turns = savings?.turns ?? null
+      const calls = savings?.calls ?? null
+      const savedTokens = savings?.savedTokens ?? null
+      const savedSeconds = savings?.savedSeconds ?? null
+      const buildMs = cache?.index?.buildMs ?? data?.cache?.index?.buildMs ?? null
+      const baseMs = savings?.indexBaselineMs ?? null
+      const speed = baseMs && buildMs ? Math.round((baseMs / Math.max(1, buildMs)) * 10) / 10 : null
+      const cards = [
+        {
+          key: 'fixed', testId: 'savings-fixed',
+          node: h(InfoCard, {
+            testId: 'savings-fixed',
+            title: pick('每轮固定', 'per request'),
+            subtitle: baseline != null && resident != null ? '1.4.1 ' + fmtInt(baseline) + ' → ' + pick('当前 ', 'now ') + fmtInt(resident) : DASH,
+            accent: MONITOR_COLORS.green,
+            rows: [
+              [pick('固定节省', 'fixed saving'), fixed == null ? DASH : fmtInt(fixed) + ' tok'],
+              [pick('口径', 'basis'), savings ? (savings.basis === 'lower-bound' ? pick('下界', 'lower bound') : String(savings.basis)) : DASH],
+            ],
+          }),
+        },
+        {
+          key: 'total', testId: 'savings-total',
+          node: h(InfoCard, {
+            testId: 'savings-total',
+            title: pick('累计节省', 'saved so far'),
+            subtitle: (turns == null ? DASH : fmtInt(turns) + ' turns') + ' · ' + (calls == null ? DASH : fmtInt(calls) + ' calls'),
+            accent: MONITOR_COLORS.green,
+            rows: [
+              [pick('合计', 'total'), kNum(savedTokens) + (savedTokens == null ? '' : ' tok')],
+              [pick('固定 / 调用面', 'fixed / calls'), kNum(fixed == null || turns == null ? null : fixed * turns) + ' / ' + kNum(savings?.callTokens)],
+            ],
+          }),
+        },
+        {
+          key: 'time', testId: 'savings-time',
+          node: h(InfoCard, {
+            testId: 'savings-time',
+            title: pick('估算省时', 'est. time saved'),
+            // est 徽章放在副标题里：它是唯一一个「折算值」，必须一眼能和实测值区分开。
+            subtitle: h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+              '≈' + fmtInt(savings?.outputTokPerSec ?? 45) + ' tok/s',
+              est(pick('按输出 token 折算，不是实测耗时', 'divided by output tok/s; not measured wall time')),
+            ),
+            accent: MONITOR_COLORS.orange,
+            rows: [
+              [pick('折算', 'folded'), savedSeconds == null ? DASH : fmtSpan(savedSeconds * 1000)],
+              [pick('来源', 'from'), savedTokens == null ? DASH : kNum(savedTokens) + ' tok'],
+            ],
+          }),
+        },
+        {
+          key: 'index', testId: 'savings-index',
+          node: h(InfoCard, {
+            testId: 'savings-index',
+            title: pick('索引加速', 'index speedup'),
+            subtitle: baseMs == null ? DASH : pick('冷建 ', 'cold ') + fmtInt(baseMs) + ' ms',
+            accent: MONITOR_COLORS.blue,
+            rows: [
+              [pick('当前 buildMs', 'build now'), buildMs == null ? DASH : fmtInt(buildMs) + ' ms'],
+              [pick('加速', 'speedup'), speed == null ? DASH : speed + '×'],
+            ],
+          }),
+        },
+      ]
+      // 堆叠条：各工具「调用次数 × 单次节省」的占比；未定标工具不进条（按 0 计）。
+      const perCall = savings?.perCall ?? {}
+      const byTool = savings?.byTool ?? {}
+      const parts = Object.entries(byTool)
+        .map(([tool, count]) => ({ tool, count: Number(count) || 0, tok: (Number(count) || 0) * (Number(perCall[tool]) || 0) }))
+        .filter((part) => part.tok > 0)
+        .sort((a, b) => b.tok - a.tok)
+      const totalTok = parts.reduce((sum, part) => sum + part.tok, 0)
+      const barColors = [MONITOR_COLORS.green, MONITOR_COLORS.blue, MONITOR_COLORS.orange, MONITOR_COLORS.yellow, MONITOR_COLORS.red]
+      let used = 0
+      const segments = parts.map((part, index) => {
+        const pct = index === parts.length - 1 ? Math.max(0, 100 - used) : Math.round((part.tok / totalTok) * 1000) / 10
+        used += pct
+        return h('div', {
+          key: part.tool,
+          title: part.tool + ' ×' + fmtInt(part.count) + ' = ' + fmtInt(part.tok) + ' tok',
+          style: { width: pct + '%', background: barColors[index % barColors.length], height: '100%' },
+        })
+      })
+      const bar = h('div', {
+        'data-dsh-savings-bar': 'tools',
+        style: {
+          display: 'flex', height: 8, borderRadius: 3, overflow: 'hidden',
+          background: MONITOR_COLORS.panel, border: '1px solid ' + MONITOR_COLORS.border,
+        },
+      }, segments.length ? segments : null)
+      const header = ['会话', 'turns', 'calls', '节省']
+      const rows = (Array.isArray(savings?.sessions) ? savings.sessions : []).slice(0, 3)
+      const table = h('div', { 'data-dsh-savings-table': 'sessions', style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+        h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 52px 52px 72px', gap: 6 } },
+          header.map((label, index) => h('span', {
+            key: label,
+            style: {
+              fontSize: 9, lineHeight: '11px', letterSpacing: 0.2, textTransform: 'uppercase', color: MONITOR_COLORS.muted,
+              textAlign: index === 0 ? 'left' : 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            },
+          }, index === 0 ? pick('会话', 'session') : label)),
+        ),
+        rows.length
+          ? rows.map((row) => h('div', {
+            key: String(row.sessionId),
+            style: { display: 'grid', gridTemplateColumns: '1fr 52px 52px 72px', gap: 6, fontSize: 10.5, fontVariantNumeric: 'tabular-nums' },
+          },
+            h('span', { title: String(row.sessionId), style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, String(row.sessionId).slice(0, 8)),
+            h('span', { style: { textAlign: 'right', color: row.counted ? MONITOR_COLORS.text : MONITOR_COLORS.muted }, title: row.counted ? undefined : pick('日志投影还没读到，按 0 计', 'log projection not read yet; counted as 0') }, row.counted ? fmtInt(row.turns) : DASH),
+            h('span', { style: { textAlign: 'right' } }, fmtInt(row.calls)),
+            h('span', { style: { textAlign: 'right' } }, kNum(row.savedTokens)),
+          ))
+          : h('span', { style: { fontSize: 10.5, color: MONITOR_COLORS.muted } }, savings ? pick('没有已计算的会话', 'no counted session yet') : DASH),
+      )
+      return h('section', {
+        'data-dsh-savings': 'row',
+        style: { display: 'flex', flexDirection: 'column', gap: 6 },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+          h('strong', { style: { fontSize: 12.5, color: MONITOR_COLORS.text } }, pick('节省', 'savings')),
+          h('span', { style: { fontSize: 10.5, color: MONITOR_COLORS.muted } },
+            savings?.note ?? pick('对比 1.4.1 基线；估算项带 est', 'vs the 1.4.1 baseline; estimates carry est')),
+        ),
+        h('div', { style: { display: 'flex', flexWrap: 'nowrap', alignItems: 'stretch', gap: 8, overflowX: 'auto', paddingBottom: 4 } },
+          cards.map((card) => h('div', { key: card.key, style: { ...CARD_STYLE } }, card.node)),
+        ),
+        bar,
+        table,
+      )
+    }
+
     // 三行卡片 + 曲线块的整体：弹窗只做布局，数据拼装都留在各 builder 里。
     /** The three Phase-4 rows as one block, so MonitorDialog itself stays a layout function. */
     function MonitorCardRows({ data, sessionLogs, sessionDetails, health, cache, selectedWorker, onSelectWorker, phase }) {
@@ -1724,6 +1885,8 @@ window.__ModuleLoader__.load({
           title: 'Cache',
           items: [cacheCard(data, cache)],
         }),
+        // 第四行：节省报表，紧跟 Cache 行（§15.2）。
+        savingsRow(data, cache),
       )
     }
 

@@ -100,6 +100,23 @@ const METRICS = {
       { sessionId: 'sess-3mo', inflight: 0, busy: false, calls: 6, lastCallMs: 0, lastTool: 'exec', lastSeenAt: Date.now() - 92 * 86400_000 },
     ],
   },
+  // 节省报表（§15）：固定 1,093/轮 + 调用面（exec 20×13 + read 12×33 + stat 5×31 + write 3×26 = 889）。
+  savings: {
+    schema: 'dsh-rust-exec/savings@1',
+    baselinePerTurn: 1812, residentPerTurn: 719, fixedPerTurn: 1093,
+    turns: 12, calls: 40,
+    byTool: { exec: 20, read: 12, stat: 5, write: 3 },
+    callTokens: 889, savedTokens: 14005, savedSeconds: 311,
+    outputTokPerSec: 45, indexBaselineMs: 171,
+    perCall: { read: 33, write: 26, edit: 22, stat: 31, exec: 13, ls: 0, search: 0, symbols: 0, session_open: 0, health: 0 },
+    basis: 'lower-bound',
+    note: '每轮固定取 1.4.1 实测下界；调用面只计已实测六类；省时按 45 tok/s 估算',
+    sessions: [
+      { sessionId: 'sess-abc123', turns: 5, calls: 7, savedTokens: 5869, lastSeenAt: Date.now() - 3000, counted: true },
+      { sessionId: 'sess-idle', turns: 4, calls: 3, savedTokens: 4586, lastSeenAt: Date.now() - 9000, counted: true },
+      { sessionId: 'sess-old', turns: 3, calls: 4, savedTokens: 3439, lastSeenAt: Date.now() - 20 * 3600_000, counted: true },
+    ],
+  },
 }
 // `/sessions` 是会话卡的权威列表：这里给两个会话，第二个空闲（inflight 0）用于验证
 // "在线状态不再退化成 —"，删除其中一条后验证卡片在同一轮轮询内消失。
@@ -120,6 +137,7 @@ globalThis.fetch = dom.window.fetch = async (url) => {
     return { ok: true, status: 200, json: async () => METRICS }
   }
   if (u.includes('/sessions')) return { ok: true, status: 200, json: async () => SESSIONS }
+  if (u.includes('/cache')) return { ok: true, status: 200, json: async () => ({ schema: 'dsh-rust-exec/cache@1', index: { files: 438, symbols: 1423, buildMs: 92, reusedFiles: 438, parsedFiles: 0 } }) }
   return { ok: true, status: 200, json: async () => ({}) }
 }
 
@@ -263,6 +281,35 @@ check('monitor dialog height drops to 75vh',
   check('long-span cells keep the full timestamp on hover',
     /T/.test(dialog?.querySelector('[data-dsh-info="session-sess-3mo"] [title*="T"]')?.getAttribute('title') || ''),
     (dialog?.querySelector('[data-dsh-info="session-sess-3mo"] [title*="T"]')?.getAttribute('title') || 'missing title'))
+}
+// §15 节省报表：固定节省是实测常量，累计/省时/索引加速各有自己的口径与降级方式。
+{
+  const savingsCard = (id) => dialog?.querySelector(`[data-dsh-info="${id}"]`)?.textContent || ''
+  check('savings row renders the measured per-request saving', /1,?093/.test(savingsCard('savings-fixed')), savingsCard('savings-fixed'))
+  check('savings total reports tokens and turns', /14k|14,005|13\.1k|13k/.test(savingsCard('savings-total')) && /12/.test(savingsCard('savings-total')), savingsCard('savings-total'))
+  check('index speedup uses the live buildMs against the 171 ms baseline', /92 ms/.test(savingsCard('savings-index')), savingsCard('savings-index'))
+  const bar = dialog?.querySelector('[data-dsh-savings-bar]')
+  const widths = bar ? [...bar.children].map((node) => parseFloat(node.style.width) || 0) : []
+  check('savings bar segments cover the whole bar', widths.length >= 3 && Math.abs(widths.reduce((sum, w) => sum + w, 0) - 100) <= 0.6,
+    widths.join('+') + ' = ' + widths.reduce((sum, w) => sum + w, 0).toFixed(1))
+  const estimates = [...(dialog?.querySelectorAll('[data-dsh-est]') ?? [])]
+  check('only the estimated card carries the est badge',
+    estimates.length === 1 && Boolean(dialog?.querySelector('[data-dsh-info="savings-time"] [data-dsh-est]')),
+    String(estimates.length) + ' badge(s)')
+  check('savings session table lists turns/calls/savings', /sess-abc/.test(dialog?.querySelector('[data-dsh-savings-table]')?.textContent || ''),
+    (dialog?.querySelector('[data-dsh-savings-table]')?.textContent || '').slice(0, 80))
+  // 旧宿主没有 savings 块：四张卡必须整体降级成 —，且不能把弹窗打挂。
+  const savedSavings = METRICS.savings
+  delete METRICS.savings
+  await settle(1400)
+  const live = rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')
+  check('savings cards degrade to dashes without data',
+    !live ? false : ['savings-fixed', 'savings-total', 'savings-time', 'savings-index']
+      .every((id) => /—/.test(live.querySelector(`[data-dsh-info="${id}"]`)?.textContent || '')),
+    live ? [...live.querySelectorAll('[data-dsh-info^="savings-"]')].map((node) => node.textContent?.trim().slice(0, 24)).join(' | ') : 'dialog gone')
+  check('savings row survives a missing payload without NaN', !/NaN|undefined/.test(live?.textContent || 'missing dialog'))
+  METRICS.savings = savedSavings
+  await settle(1400)
 }
 {
   // 删除会话：`/sessions` 变成空列表后，下一轮轮询必须把卡片收掉（不留空壳）。

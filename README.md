@@ -28,7 +28,7 @@
 
 对外是 **10 个工具 + 8 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.7.2**（2026-10-28）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；1.5.0–1.6.x 以 scope 发布为 `@keer1024/dsh-native`，**1.7.0 起恢复无 scope 的 `dsh-native`**；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。1.7.1 只动监控卡片：心跳计数器、状态条可点开监控、会话行不再退化成 `—`。1.7.2 把监控弹窗高度压到 `75vh`（−14.8%），并让会话卡的「最近调用」能表达 `20 小时前`、`2 天前`、`3 月前` 这种长跨度（悬停看完整时间戳）。
+> 当前版本 **1.7.3**（2026-10-28）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；1.5.0–1.6.x 以 scope 发布为 `@keer1024/dsh-native`，**1.7.0 起恢复无 scope 的 `dsh-native`**；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。1.7.1 只动监控卡片：心跳计数器、状态条可点开监控、会话行不再退化成 `—`。1.7.2 把监控弹窗高度压到 `75vh`（−14.8%），并让会话卡的「最近调用」能表达 `20 小时前`、`2 天前`、`3 月前` 这种长跨度（悬停看完整时间戳）。1.7.3 在监控弹窗里加了一行**节省报表**：每轮固定省 1,093 tok、累计节省、折算省时（带 `est` 徽章）与索引加速，口径见 §9.1。
 >
 > 1.6.1 同时带来：worker 镜像搬到 `%LOCALAPPDATA%\dsh-native\bin`（摆脱 DSH 沙箱给工作区 exe 打的 Low IL 标签）、异步启动（DSH 先开，worker 延迟 1.2 s 拉起，`readiness` 状态机就绪后前端自动刷新）、监控器三行卡片重设计，以及本轮的**全量中文注释**与 `tools/build_plugin.mjs` 构建脚本（产物落根目录 `bin/`）。
 >
@@ -104,10 +104,10 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\dsh-native-1.7.2.tgz -Algorithm SHA256
-# 与 bin\dsh-native-1.7.2.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\dsh-native-1.7.3.tgz -Algorithm SHA256
+# 与 bin\dsh-native-1.7.3.tgz.sha256 里的摘要比对
 
-npm i .\bin\dsh-native-1.7.2.tgz
+npm i .\bin\dsh-native-1.7.3.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -304,6 +304,13 @@ worker 镜像、完整性判定和日志路径。
 - **曲线组**：紧贴在 Workers 行下方，8 张 sparkline 卡（CPU 单核、工作集、私有字节、句柄、队列深度、运行中、索引文件数、索引符号数），数据取 `/metrics.workers[i].history`；多 worker 时随选中的卡片切换，标题带 `worker #id · pid …`。
 - **Sessions 行**：每个会话一张卡（inflight、calls、最近调用、最近活动），右上角圆点表示是否正在通信（`inflight > 0` 绿、空闲灰，圆点带 `aria-label`/`title`，不单靠颜色）。空闲会话显示 `inflight 0`（不是 `—`）。`最近调用` 用长跨度格式：`2 秒前`、`15 分钟前`、`20 小时前`、`2 天前`、`3 月前`、`2 年前`，确有耗时再附 `· 42 ms`（例 `20 小时前 · 42 ms`），悬停显示完整 ISO 时间；两者都没有才是 `—`。`/sessions` 还没答过时用 `/metrics.pool.sessions` 兜底，**答过之后以 `/sessions` 为准**：DSH 里删掉会话，下一轮 1 s 轮询就把卡片收掉。
 - **Cache 行**：单张卡，上半是宿主读缓存（entries/limit、hits/misses、字节、TTL），下半是 worker 索引（files/symbols、buildMs、reused/parsed），数据来自 `/cache`。
+- **节省行**（1.7.3 起）：四张卡 + 一条堆叠条 + 一张会话表，数据来自 `/metrics.savings`。
+  - `每轮固定`：`1,093 tok`，即 1.4.1 的 1,812 tok 减去当前常驻的 719 tok；这是**每轮请求都会发生**的差额，属于下界（`basis: lower-bound`）。
+  - `累计节省`：`固定 × turns` 加上调用面（`read 33 / write 26 / edit 22 / stat 31 / exec 13` tok/次，只统计模型真正发起的工具调用；`ls/search/symbols` 未定标按 0，不猜）。`turns` 取自最近 5 个会话日志的投影，最多每 30 s 刷新一次。
+  - `估算省时`：`节省 ÷ 45 tok/s`，卡上带 `est` 徽章——这是**折算值，不是实测耗时**。
+  - `索引加速`：`/cache` 的真实 `buildMs` 对 1.4.1 冷建基线 171 ms 的倍速，属于实测毫秒。
+  - 堆叠条按工具展示「次数 × 单次差额」的占比，会话表只列最新 3 个会话。
+  - 明确**不报**：provider 侧 cache 命中率、模型 p95 延迟——宿主看不到，宁可缺也不编。
 - `readiness` 没到 `ready` 时，Workers/Sessions 行显示「启动中…」，曲线区显示「等待采样…」；一旦就绪，前端立刻补拉 `/metrics`、`/sessions`、`/cache`，不需要手动刷新。
 - `extremes` 与曲线环都由宿主在内存里累计：**DSH 重启清零，刷新页面不丢**。
 

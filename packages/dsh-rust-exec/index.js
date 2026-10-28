@@ -67,6 +67,32 @@ const SEARCH_TIMEOUT_MS = 60_000
 // A cold projection of a multi-megabyte log pays zstd decode + JSON parse once; the cache makes
 // later opens cheap, so this only bounds the worst-case first open.
 const SESSION_TIMEOUT_MS = 120_000
+// 节省口径（只放实测常量，不做运行期重算——每条 schema 现算 tiktoken 太贵）：
+// 1.4.1 十个工具全常驻 1,812 tok/请求 → 1.6+ 五个常驻 719（cl100k_base 代理分词，计划 §3.1）；
+// 单条结果行的实测差见 §3.5：read 59→26 / write 48→22 / edit 47→25 / stat 66→35 / exec 22→9。
+// 这些数字是"下界"：错误重试减少、compact 读取等额外收益没有计入。
+const SAVINGS_PER_TURN_BASELINE = 1812
+const SAVINGS_PER_TURN_RESIDENT = 719
+/** 输出 token 吞吐只用于把节省折算成「估算秒数」，不是实测的模型速度（可配，见 §15.3）。 */
+const SAVINGS_OUTPUT_TOK_PER_S = 45
+/** 索引冷建基线：1,287 文件 / 9.5 MB 实测 171 ms（§3.4）；/cache 的 buildMs 与它对比才有意义。 */
+const SAVINGS_INDEX_BASELINE_MS = 171
+/** 单次调用的结果面节省（已定标的六类，其余按 0 计——宁少不多）。 */
+const SAVINGS_PER_CALL = {
+  read: 33, write: 26, edit: 22, stat: 31, exec: 13,
+  ls: 0, search: 0, symbols: 0, session_open: 0, health: 0,
+}
+/** worker 方法名 → 上表的统计键；未列出的方法原样记录，折算时按 0。 */
+const SAVINGS_TOOL_KEY = {
+  'fs.read': 'read', 'fs.write': 'write', 'fs.edit': 'edit', 'fs.stat': 'stat', 'fs.list': 'ls',
+  exec: 'exec', 'search.text': 'search', 'search.symbol': 'symbols',
+  'session.open': 'session_open', 'worker.health': 'health',
+}
+/** 真正由模型发起的工具面：只有这些计入 calls/byTool（宿主内部路由调用不算）。 */
+const SAVINGS_MODEL_TOOLS = new Set(['read', 'write', 'edit', 'stat', 'exec', 'ls', 'search', 'symbols'])
+/** turns 只能从会话日志投影里读（DSH 是真相源），所以限频：最多每 30 s 读最新 5 个会话。 */
+const SAVINGS_TURNS_REFRESH_MS = 30_000
+const SAVINGS_TURNS_SESSIONS = 5
 /** 协议版本守卫：宿主与 worker 各持一份，握手时比对，不匹配就让 worker 退出而不是错跑。 */
 /** Must match `PROTOCOL_VERSION` in the worker's main.rs. */
 const HELLO_VERSION = 1
@@ -1480,6 +1506,11 @@ export class WorkerPool {
   // Per-session counters that survive between calls, so the monitor can show which
   // conversation is actually driving the worker right now.
   #sessionStats = new Map()
+  // 节省报表：按会话缓存的 turns/toolCalls。签名由 `id:size:mtimeMs` 组成，日志没变就不重读，
+  // 因为一次冷投影要 zstd 解码整份日志（可能是几 MB）。
+  #savingsTurns = new Map()
+  #savingsTurnsAt = 0
+  #savingsTurnsBusy = false
   #queues = new Map()
   #rotation = []
   #queueDepth = 0
@@ -1623,6 +1654,71 @@ export class WorkerPool {
     }
   }
 
+  /** 纯数据副本：节省报表要读每会话的 calls/byTool，但统计表是私有的。 */
+  sessionStats() {
+    return [...this.#sessionStats.entries()].map(([sessionId, stats]) => ({
+      sessionId,
+      calls: stats?.calls ?? 0,
+      lastCallMs: stats?.lastCallMs ?? 0,
+      lastTool: stats?.lastTool ?? '',
+      lastSeenAt: stats?.lastSeenAt ?? 0,
+      byTool: { ...(stats?.byTool ?? {}) },
+    }))
+  }
+
+  /** 缓存里的 turns/toolCalls 列表（新的在前）；报表只读这里，不在这里读盘。 */
+  savingsTurns() {
+    return [...this.#savingsTurns.entries()]
+      .map(([sessionId, entry]) => ({ sessionId, ...entry }))
+      .sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0))
+  }
+
+  /**
+   * Refresh the cached `turns` for the newest few session logs. `turns` is DSH's own
+   * count and only the projection exposes it, so this is the one place the savings
+   * report touches the worker: at most every 30 s, only the newest 5 logs, and only
+   * when that log's `id:size:mtimeMs` signature changed since the last read.
+   */
+  async refreshSavingsTurns() {
+    if (this.#savingsTurnsBusy) return
+    const now = Date.now()
+    if (now - this.#savingsTurnsAt < SAVINGS_TURNS_REFRESH_MS) return
+    this.#savingsTurnsAt = now
+    this.#savingsTurnsBusy = true
+    try {
+      const logs = await listSessionLogs(SAVINGS_TURNS_SESSIONS)
+      for (const log of logs) {
+        const key = `${log.id}:${log.size}:${log.mtimeMs}`
+        const cached = this.#savingsTurns.get(log.id)
+        if (cached && cached.key === key) continue
+        try {
+          const value = await this.call(
+            'session.open',
+            { path: await resolveSessionLog(log.id), limit: 1 },
+            SESSION_TIMEOUT_MS,
+            undefined,
+            'http',
+          )
+          const counts = value?.counts ?? {}
+          this.#savingsTurns.set(log.id, {
+            key,
+            turns: Math.max(0, Math.round(Number(counts.turns) || 0)),
+            toolCalls: Math.max(0, Math.round(Number(counts.toolCalls) || 0)),
+            lastSeenAt: Number(log.mtimeMs) || 0,
+            size: log.size,
+            workspace: log.workspace,
+          })
+        } catch {
+          // 投影失败（日志正被写、zstd 半帧、worker 刚重启）只影响报表，不影响面板其余部分。
+        }
+      }
+    } catch {
+      // 没有 DSH_HOME / 会话目录不可读：保持上一次的缓存值。
+    } finally {
+      this.#savingsTurnsBusy = false
+    }
+  }
+
   /**
    * Apply the RSS/CPU soft limits to one metrics sample. Order matters: shed the
    * index first (it is rebuildable), pause background index builds second, and
@@ -1747,8 +1843,18 @@ export class WorkerPool {
     }
     this.#sessionInflight.set(job.sessionId, (this.#sessionInflight.get(job.sessionId) ?? 0) + 1)
     const startedAt = Date.now()
-    const stats = this.#sessionStats.get(job.sessionId) ?? { calls: 0, lastCallMs: 0, lastTool: '', lastSeenAt: 0 }
-    stats.calls += 1
+    const stats = this.#sessionStats.get(job.sessionId)
+      ?? { calls: 0, lastCallMs: 0, lastTool: '', lastSeenAt: 0, byTool: {} }
+    // 逐工具计数：节省报表用「单次实测差 × 调用次数」折算，未定标的工具照样计数但按 0 计。
+    // 旧会话条目可能是在加 byTool 之前建的，这里兜一次默认值。
+    // 只统计模型能直接调用的工具：宿主内部的 index.status / session.open / metrics 采样
+    // 不算「省下的调用面」，否则报表里的 calls 虚高而节省额仍是 0。
+    const toolKey = SAVINGS_TOOL_KEY[job.method] ?? job.method
+    if (SAVINGS_MODEL_TOOLS.has(toolKey)) {
+      stats.calls += 1
+      stats.byTool = stats.byTool ?? {}
+      stats.byTool[toolKey] = (stats.byTool[toolKey] ?? 0) + 1
+    }
     stats.lastTool = job.method
     stats.lastSeenAt = startedAt
     this.#sessionStats.set(job.sessionId, stats)
@@ -2647,6 +2753,8 @@ class MetricsStore {
       // Soft limits only shed/pause the index; exec and fs calls are never throttled.
       await this.pool.applySoftLimits(raw)
       this.#push(raw)
+      // turns 只能从会话日志投影读，限频且失败不影响采样本身。
+      void this.pool.refreshSavingsTurns().catch(() => {})
     } catch (error) {
       this.errors += 1
       this.lastError = error?.message ?? String(error)
@@ -2703,6 +2811,73 @@ class MetricsStore {
     }
   }
 
+  /**
+   * 「节省」报表：每轮固定节省（实测常量）+ 调用面（实测单次差 × 真实调用数）。
+   * 全部是下界，绝不外推；估算项（秒数）由前端打 `est` 徽章，这里只给数字和口径。
+   * 任何一环异常都返回 null，报表不能把 `/metrics` 打挂。
+   */
+  savingsSnapshot() {
+    try {
+      const fixedPerTurn = SAVINGS_PER_TURN_BASELINE - SAVINGS_PER_TURN_RESIDENT
+      const sessions = this.pool.sessionStats()
+      const turnsById = new Map(this.pool.savingsTurns().map((entry) => [entry.sessionId, entry]))
+      const byTool = {}
+      let calls = 0
+      for (const session of sessions) {
+        calls += session.calls
+        for (const [tool, count] of Object.entries(session.byTool ?? {})) {
+          byTool[tool] = (byTool[tool] ?? 0) + count
+        }
+      }
+      let turns = 0
+      for (const entry of turnsById.values()) turns += entry.turns ?? 0
+      let callTokens = 0
+      for (const [tool, count] of Object.entries(byTool)) {
+        callTokens += count * (SAVINGS_PER_CALL[tool] ?? 0)
+      }
+      const savedTokens = fixedPerTurn * turns + callTokens
+      // 每个会话的折算：turns 来自日志投影，calls 来自宿主统计，两者可能不同步（先说清楚）。
+      const sessionsOut = sessions
+        .map((session) => {
+          const entry = turnsById.get(session.sessionId) ?? null
+          const sessionTurns = entry?.turns ?? 0
+          let tokens = fixedPerTurn * sessionTurns
+          for (const [tool, count] of Object.entries(session.byTool ?? {})) {
+            tokens += count * (SAVINGS_PER_CALL[tool] ?? 0)
+          }
+          return {
+            sessionId: session.sessionId,
+            turns: sessionTurns,
+            calls: session.calls,
+            savedTokens: tokens,
+            lastSeenAt: Math.max(session.lastSeenAt ?? 0, entry?.lastSeenAt ?? 0),
+            counted: Boolean(entry),
+          }
+        })
+        .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+      return {
+        schema: 'dsh-rust-exec/savings@1',
+        baselinePerTurn: SAVINGS_PER_TURN_BASELINE,
+        residentPerTurn: SAVINGS_PER_TURN_RESIDENT,
+        fixedPerTurn,
+        turns,
+        calls,
+        byTool,
+        callTokens,
+        savedTokens,
+        savedSeconds: Math.round(savedTokens / SAVINGS_OUTPUT_TOK_PER_S),
+        outputTokPerSec: SAVINGS_OUTPUT_TOK_PER_S,
+        indexBaselineMs: SAVINGS_INDEX_BASELINE_MS,
+        perCall: { ...SAVINGS_PER_CALL },
+        basis: 'lower-bound',
+        note: '每轮固定取 1.4.1 实测下界；调用面只计已实测六类；省时按 45 tok/s 估算',
+        sessions: sessionsOut,
+      }
+    } catch {
+      return null
+    }
+  }
+
   /** /metrics 的完整响应：配置、历史、极值、池状态、每 worker 明细与缓存计数。 */
   snapshot() {
     return {
@@ -2725,6 +2900,8 @@ class MetricsStore {
       pool: this.pool.info(),
       workers: this.#workersPayload(),
       cache: this.#cachePayload(),
+      // 报表字段独立成块：旧前端不认识它，新前端缺它时整行显示 `—`。
+      savings: this.savingsSnapshot(),
       readiness: this.readiness ?? null,
       config: {
         lanes: this.pool.lanesPerWorker,
