@@ -128,6 +128,30 @@ window.__ModuleLoader__.load({
       return fmtDuration(Date.now() - ms) + ' ago'
     }
 
+    // 长跨度时间：秒 / 分钟 / 小时 / 天 / 月 / 年。
+    // 为什么不复用 `fmtDuration`：它只到 `h m`，而且心跳、活动、index age、ttl/build 都靠它保持
+    // 短格式；把这里的长单位塞进去会连带改掉那些格子，所以单开一个函数，只服务「最近调用」。
+    function fmtSpan(ms) {
+      const n = Math.max(0, Number(ms) || 0)
+      const s = Math.round(n / 1000)
+      if (s < 60) return s + pick(' 秒', ' s')
+      const m = Math.floor(s / 60)
+      if (m < 60) return m + pick(' 分钟', ' min')
+      const hours = Math.floor(m / 60)
+      if (hours < 24) return hours + pick(' 小时', ' h')
+      const days = Math.floor(hours / 24)
+      if (days < 30) return days + pick(' 天', ' d')
+      const months = Math.floor(days / 30)
+      if (months < 12) return months + pick(' 月', ' mo')
+      return Math.floor(days / 365) + pick(' 年', ' y')
+    }
+
+    // 距今时间（`20 小时前` / `2 天前` / `3 月前`）；没有时间戳时返回 —，调用方不必判空。
+    function fmtSpanAgo(ms) {
+      if (!ms) return '—'
+      return fmtSpan(Date.now() - ms) + pick('前', ' ago')
+    }
+
     // 极简 sparkline：按数据最大值等比缩放到 100×30 视口；单点数据时补 0 并按整宽取步长，
     // 避免除零、也让曲线退化成一条水平线而不是空 path。
     function Sparkline({ points, color, label, value }) {
@@ -1237,7 +1261,9 @@ window.__ModuleLoader__.load({
               },
             }, row[0]),
             h('span', {
-              title: typeof row[1] === 'string' ? row[1] : undefined,
+              // 行可以是 `[label, value]`，也可以是 `[label, value, title]`：后者让显示值保持简短
+              // （相对时间、截断路径），悬停仍能看到完整内容。
+              title: row[2] ?? (typeof row[1] === 'string' ? row[1] : undefined),
               style: {
                 fontSize: 11, lineHeight: '14px', fontVariantNumeric: 'tabular-nums', minWidth: 0,
                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -1501,10 +1527,12 @@ window.__ModuleLoader__.load({
         const inflightCount = inflight ? Math.max(0, Number(inflight.inflight ?? 0) || 0) : 0
         const lastCallMs = inflight && Number.isFinite(Number(inflight.lastCallMs)) ? Number(inflight.lastCallMs) : null
         const lastSeenAt = inflight && Number.isFinite(Number(inflight.lastSeenAt)) ? Number(inflight.lastSeenAt) : null
-        const lastCall = lastCallMs !== null && lastCallMs > 0
-          ? fmtInt(lastCallMs) + ' ms'
-          : lastSeenAt
-            ? ago(lastSeenAt)
+        // 「最近调用」要能表达 20 小时 / 2 天 / 3 月这种跨度，所以距今时间用 fmtSpanAgo（长单位），
+        // 已知单次耗时再附 `· 42 ms`；悬停给完整 ISO 时间，方便核对而不是靠换算。
+        const lastCall = lastSeenAt
+          ? fmtSpanAgo(lastSeenAt) + (lastCallMs !== null && lastCallMs > 0 ? ' · ' + fmtInt(lastCallMs) + ' ms' : '')
+          : lastCallMs !== null && lastCallMs > 0
+            ? fmtInt(lastCallMs) + ' ms'
             : DASH
         const cache = detail?.loading
           ? pick('读取中…', 'loading…')
@@ -1530,7 +1558,8 @@ window.__ModuleLoader__.load({
               [pick('步骤/轮次', 'steps/turns'), counts ? fmtInt(counts.steps) + '/' + fmtInt(counts.turns) : DASH],
               [pick('活动', 'active'), active],
               ['inflight', String(inflightCount)],
-              [pick('最近调用', 'last call'), lastCall],
+              // 第三个元素是悬停标题：显示相对时间，悬停看完整 ISO 时间。
+              [pick('最近调用', 'last call'), lastCall, lastSeenAt ? new Date(lastSeenAt).toISOString() : undefined],
               [pick('投影', 'cache'), cache],
             ],
           }),
@@ -1733,7 +1762,7 @@ window.__ModuleLoader__.load({
           role: 'dialog',
           'aria-label': pick('dsh-native 性能监控', 'dsh-native performance monitor'),
           style: {
-            width: 'min(1100px, 96vw)', maxHeight: '88vh', overflow: 'auto',
+            width: 'min(1100px, 96vw)', maxHeight: '75vh', overflow: 'auto',
             background: MONITOR_COLORS.bg, color: MONITOR_COLORS.text,
             border: '1px solid ' + MONITOR_COLORS.border, borderRadius: 10,
             padding: '14px 16px 18px', boxShadow: '0 20px 60px rgba(0,0,0,0.6)',

@@ -2,6 +2,31 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.2 — 2026-10-28
+
+Monitor presentation only: the dialog gets shorter and the session card's "last call" cell can now
+express long spans. No wire-protocol, tool-schema, route or worker-binary change.
+
+### Changed — the monitor dialog is 15% shorter
+- `MonitorDialog` panel `maxHeight: '88vh'` → `'75vh'` (−14.8%). Nothing is removed: the chart
+  cards, the card rows and the footer stay, the extra content scrolls inside the dialog.
+
+### Added — `fmtSpan()` for long time spans
+- New `fmtSpan(ms)` renders 秒 / 分钟 / 小时 / 天 / 月 / 年 (`20 小时`, `2 天`, `3 月`), with
+  `fmtSpanAgo(ms)` adding 前 / ago. It exists only for the "last call" cell: `fmtDuration()` and
+  `ago()` are shared by the heartbeat, activity, index age and ttl/build cells, so changing them
+  would have moved unrelated numbers.
+- The session card now reads `20 小时前 · 42 ms` — the age is always shown, the duration is appended
+  when the session has a `lastCallMs`. Cells support an optional third element
+  (`[label, value, title]`), so hovering shows the full ISO timestamp instead of a derived value.
+- A session with neither timestamp nor duration still renders `—` rather than `NaN`.
+
+### Verified
+- `node tools/monitor_render_test.mjs` → `---- ALL PASS ----` (37 existing + 5 new assertions:
+  `75vh`, 20-hour / 2-day / 3-month spans, hover timestamp).
+- `check_client_identity.mjs` 20/20, `panel_render_test.mjs` / `projection_render_test.mjs` pass,
+  `_native/measure/harness.mjs` 11 tools / 0 failures, `mount.mjs` pending → ready.
+
 ## 1.7.1 — 2026-10-28
 
 Monitoring cards only: three fixes reported from the panel (heartbeat counter, a click target for the

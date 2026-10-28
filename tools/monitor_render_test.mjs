@@ -94,6 +94,10 @@ const METRICS = {
     sessions: [
       { sessionId: 'sess-abc123', inflight: 1, busy: true, calls: 7, lastCallMs: 42, lastTool: 'exec', lastSeenAt: Date.now() - 3000 },
       { sessionId: 'sess-idle', inflight: 0, busy: false, calls: 3, lastCallMs: 0, lastTool: 'read', lastSeenAt: Date.now() - 9000 },
+      // 三个长跨度会话：验证「最近调用」能表达 20 小时 / 2 天 / 3 月，而不是只到分钟。
+      { sessionId: 'sess-old', inflight: 0, busy: false, calls: 4, lastCallMs: 0, lastTool: 'read', lastSeenAt: Date.now() - 20 * 3600_000 },
+      { sessionId: 'sess-2d', inflight: 0, busy: false, calls: 5, lastCallMs: 0, lastTool: 'grep', lastSeenAt: Date.now() - 2 * 86400_000 },
+      { sessionId: 'sess-3mo', inflight: 0, busy: false, calls: 6, lastCallMs: 0, lastTool: 'exec', lastSeenAt: Date.now() - 92 * 86400_000 },
     ],
   },
 }
@@ -103,6 +107,9 @@ let SESSIONS = {
   sessions: [
     { id: 'sess-abc123', workspace: 'w', size: 2048, mtimeMs: Date.now() - 3000 },
     { id: 'sess-idle', workspace: 'w', size: 1024, mtimeMs: Date.now() - 9000 },
+    { id: 'sess-old', workspace: 'w', size: 1024, mtimeMs: Date.now() - 20 * 3600_000 },
+    { id: 'sess-2d', workspace: 'w', size: 1024, mtimeMs: Date.now() - 2 * 86400_000 },
+    { id: 'sess-3mo', workspace: 'w', size: 1024, mtimeMs: Date.now() - 92 * 86400_000 },
   ],
 }
 let metricsDown = false
@@ -243,6 +250,20 @@ check('idle session shows a last-call age instead of a dash',
 check('busy session still shows its live inflight count',
   /inflight\s*1/.test(dialog?.querySelector('[data-dsh-info="session-sess-abc123"]')?.textContent || ''),
   dialog?.querySelector('[data-dsh-info="session-sess-abc123"]')?.textContent || 'missing card')
+// 需求 A：监控弹窗高度降 15%（88vh → 75vh），内容仍完整可滚动。
+check('monitor dialog height drops to 75vh',
+  /max-height:\s*75vh/.test(dialog?.outerHTML || ''),
+  (dialog?.outerHTML || '').match(/max-height:\s*[^;"]+/)?.[0] || 'missing max-height')
+// 需求 B：长跨度必须能表达，而不是停在 `4h 12m` 或退化成 —。
+{
+  const cell = (id) => dialog?.querySelector(`[data-dsh-info="session-${id}"]`)?.textContent || ''
+  check('last call shows a 20-hour span', /20 (小时前|h ago)/.test(cell('sess-old')), cell('sess-old'))
+  check('last call shows a 2-day span', /2 (天前|d ago)/.test(cell('sess-2d')), cell('sess-2d'))
+  check('last call shows a 3-month span', /3 (月前|mo ago)/.test(cell('sess-3mo')), cell('sess-3mo'))
+  check('long-span cells keep the full timestamp on hover',
+    /T/.test(dialog?.querySelector('[data-dsh-info="session-sess-3mo"] [title*="T"]')?.getAttribute('title') || ''),
+    (dialog?.querySelector('[data-dsh-info="session-sess-3mo"] [title*="T"]')?.getAttribute('title') || 'missing title'))
+}
 {
   // 删除会话：`/sessions` 变成空列表后，下一轮轮询必须把卡片收掉（不留空壳）。
   SESSIONS = { sessions: [] }
