@@ -578,6 +578,8 @@ export class RustWorker {
   #failCount = 0
   #restartAt = 0
   #misses = 0
+  /** Heartbeat ticks that actually went out to this child; the panel card shows it as `#N`. */
+  #beats = 0
   #lastExitCode = null
   /** pid this host recorded in the profile lock for the current child. */
   #lockPid = null
@@ -675,6 +677,11 @@ export class RustWorker {
       + `the worker itself starting at Low integrity. Log: ${workerLogPath()}`
   }
 
+  /** 心跳计数：本子进程启动以来发出的 ping 数，重启后从 0 重新累加。 */
+  get beatCount() {
+    return this.#beats
+  }
+
   /** 本地计数 + worker 自述合成一份快照；worker 不在或自述超时也必须返回本地部分。 */
   /** Lifecycle snapshot: local counters merged with the worker's own view. */
   async health() {
@@ -685,6 +692,7 @@ export class RustWorker {
       inflight: this.#pending.size,
       restarts: this.#restarts,
       misses: this.#misses,
+      beats: this.#beats,
       failCount: this.#failCount,
       lastExitCode: this.#lastExitCode,
       inboundGapP50: percentile(this.#activityGaps, 50),
@@ -1014,6 +1022,8 @@ export class RustWorker {
         monoTs: Math.round(now),
       })
       this.#nextId += 1
+      // 心跳计数：每发出一帧 ping 就 +1，面板把它显示在"上次心跳"右侧（重启后归零）。
+      this.#beats += 1
       this.#beatTimer = setTimeout(tick, HEARTBEAT_MS)
       this.#beatTimer.unref?.()
     }
@@ -1575,6 +1585,8 @@ export class WorkerPool {
 
   /** Structured pool snapshot for /metrics and the settings panel. */
   info() {
+    // 统计表按 30 分钟 TTL 过滤：DSH 会话结束后条目不会再被更新，长期不剪会无限增长。
+    const staleBefore = Date.now() - 30 * 60_000
     return {
       schema: 'dsh-rust-exec/pool@1',
       workers: this.#entries.length,
@@ -1586,11 +1598,19 @@ export class WorkerPool {
       rssSoftLimitMb: this.options.rssSoftLimitMb,
       cpuSoftLimitPct: this.options.cpuSoftLimitPct,
       queueDepth: this.#queueDepth,
-      sessions: [...this.#sessionInflight.entries()].map(([sessionId, inflight]) => {
+      // 会话表取「在途表 ∪ 统计表」的并集：只列在途会话时，空闲会话会整体消失，
+      // 面板只能画成 `—`（本次修复的根因）。这里让空闲会话也出现，`inflight: 0`。
+      sessions: [...new Set([
+        ...this.#sessionInflight.keys(),
+        ...[...this.#sessionStats.entries()]
+          .filter(([, stats]) => (stats?.lastSeenAt ?? 0) >= staleBefore)
+          .map(([sessionId]) => sessionId),
+      ])].map((sessionId) => {
         const stats = this.#sessionStats.get(sessionId) ?? null
         return {
           sessionId,
-          inflight,
+          inflight: this.#sessionInflight.get(sessionId) ?? 0,
+          busy: (this.#sessionInflight.get(sessionId) ?? 0) > 0,
           calls: stats?.calls ?? 0,
           lastCallMs: stats?.lastCallMs ?? 0,
           lastTool: stats?.lastTool ?? '',
@@ -1924,6 +1944,8 @@ export class WorkerPool {
       pid: entry.worker.info?.pid ?? null,
       running: entry.worker.running,
       inflight: entry.inflight,
+      // 心跳计数（每个 worker 自己的 ping 数），面板心跳格显示为 `2s ago · #128`。
+      beatCount: entry.worker.beatCount ?? null,
       lanes: entry.worker.options?.lanes ?? null,
       lastUsedAt: entry.lastUsedAt,
       retiring: entry.retiring,

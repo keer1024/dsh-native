@@ -3,9 +3,14 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = 'C:/Users/keer_/Documents/deepseek-harness/default-workspace'
-const require = createRequire(path.join(ROOT, '_bench/panel-test/'))
+// 源码取自本脚本所在的仓库（而不是某个外部工作区），避免测试与仓库不同步。
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+// React/jsdom 从开发工作区的依赖缓存里解析：仓库本身不装 node_modules。
+const DEPS = process.env.DSH_NATIVE_DEPS
+  ?? 'C:/Users/keer_/Documents/deepseek-harness/default-workspace/_bench/panel-test/'
+const require = createRequire(path.join(DEPS, 'entry.js'))
 const React = require('react')
 const ReactDOMClient = require('react-dom/client')
 const { JSDOM } = require('jsdom')
@@ -38,7 +43,7 @@ dom.window.__ModuleLoader__ = {
     }) }
   },
 }
-const source = readFileSync(path.join(ROOT, 'packages/dsh-rust-exec/client.js'), 'utf8')
+const source = readFileSync(path.join(REPO, 'packages/dsh-rust-exec/client.js'), 'utf8')
 await import('data:text/javascript;base64,' + Buffer.from(source, 'utf8').toString('base64'))
 if (!captured) throw new Error('module loader was not called')
 
@@ -85,9 +90,20 @@ const METRICS = {
   pool: {
     workers: 1, lanesPerWorker: 4, queueDepth: 2, maxWorkers: 1, maxShells: 8,
     stats: { calls: 41, rejected: 0, spawned: 1 },
-    workersDetail: [{ id: 0, pid: 4321, lanes: 4, inflight: 2, retiring: false }],
-    sessions: [{ sessionId: 'sess-abc123', inflight: 1, calls: 7, lastCallMs: 42, lastTool: 'exec', lastSeenAt: Date.now() - 3000 }],
+    workersDetail: [{ id: 0, pid: 4321, lanes: 4, inflight: 2, beatCount: 128, retiring: false }],
+    sessions: [
+      { sessionId: 'sess-abc123', inflight: 1, busy: true, calls: 7, lastCallMs: 42, lastTool: 'exec', lastSeenAt: Date.now() - 3000 },
+      { sessionId: 'sess-idle', inflight: 0, busy: false, calls: 3, lastCallMs: 0, lastTool: 'read', lastSeenAt: Date.now() - 9000 },
+    ],
   },
+}
+// `/sessions` 是会话卡的权威列表：这里给两个会话，第二个空闲（inflight 0）用于验证
+// "在线状态不再退化成 —"，删除其中一条后验证卡片在同一轮轮询内消失。
+let SESSIONS = {
+  sessions: [
+    { id: 'sess-abc123', workspace: 'w', size: 2048, mtimeMs: Date.now() - 3000 },
+    { id: 'sess-idle', workspace: 'w', size: 1024, mtimeMs: Date.now() - 9000 },
+  ],
 }
 let metricsDown = false
 globalThis.fetch = dom.window.fetch = async (url) => {
@@ -96,6 +112,7 @@ globalThis.fetch = dom.window.fetch = async (url) => {
     if (metricsDown) return { ok: false, status: 500, json: async () => ({}) }
     return { ok: true, status: 200, json: async () => METRICS }
   }
+  if (u.includes('/sessions')) return { ok: true, status: 200, json: async () => SESSIONS }
   return { ok: true, status: 200, json: async () => ({}) }
 }
 
@@ -179,6 +196,22 @@ await render(byId('dsh-native-strip').Component)
 check('strip keeps last sample on transient metrics failure', !/NaN|undefined/.test(text()))
 metricsDown = false
 
+console.log('\n=== strip opens the monitor in place ===')
+await render(byId('dsh-native-strip').Component)
+{
+  const strip = rootEl.querySelector('[data-dsh-rust-strip="summary"]')
+  check('strip is a keyboard-reachable button',
+    Boolean(strip) && strip.getAttribute('role') === 'button' && strip.getAttribute('tabindex') === '0')
+  check('strip advertises the click target', /监控|monitor/i.test(strip?.getAttribute('title') || ''), strip?.getAttribute('title') || '')
+  await click(strip)
+  check('clicking the strip opens the monitor dialog', Boolean(rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')))
+  await act(async () => {
+    dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  })
+  await settle(220)
+  check('Escape closes the strip-opened dialog', !rootEl.querySelector('[data-dsh-rust-monitor="dialog"]'))
+}
+
 console.log('\n=== settings tab toolbar + Grafana monitor dialog ===')
 await render(byId('dsh-native').Component)
 await settle(200)
@@ -196,8 +229,30 @@ const cards = dialog ? [...dialog.querySelectorAll('[data-dsh-rust-monitor-card]
 check('stat cards rendered', cards.length >= 8, String(cards.length))
 check('cards show current + min/max', /min 3/.test(dialog?.textContent || '') && /max 12/.test(dialog?.textContent || ''))
 check('sparklines drawn (zero-dependency svg)', (dialog?.querySelectorAll('svg[data-dsh-rust-sparkline] path')?.length ?? 0) >= 8, String(dialog?.querySelectorAll('svg[data-dsh-rust-sparkline] path').length ?? 0))
-check('workers table rendered', /pid/.test(dialog?.textContent || '') && /4321/.test(dialog?.textContent || ''))
-check('active sessions table rendered', /sess-abc123/.test(dialog?.textContent || '') && /42 ms/.test(dialog?.textContent || ''))
+check('worker card row rendered', /pid/.test(dialog?.textContent || '') && /4321/.test(dialog?.textContent || ''))
+check('session card row rendered from live pool activity', /sess-abc/.test(dialog?.textContent || '') && /42 ms/.test(dialog?.textContent || ''))
+check('legacy workers/sessions tables removed', !/Workers \(lanes\)/.test(dialog?.textContent || '') && !/Active sessions/.test(dialog?.textContent || ''))
+check('charts sit under the worker row', Boolean(dialog?.querySelector('[data-dsh-rust-charts="worker"]')))
+check('worker heartbeat counter renders beside the beat age', /#128/.test(dialog?.textContent || ''),
+  (dialog?.textContent || '').match(/心跳[^·]{0,24}/)?.[0] || '')
+check('idle session is listed with inflight 0',
+  /inflight\s*0/.test(dialog?.querySelector('[data-dsh-info="session-sess-idle"]')?.textContent || ''),
+  dialog?.querySelector('[data-dsh-info="session-sess-idle"]')?.textContent || 'missing card')
+check('idle session shows a last-call age instead of a dash',
+  !/最近调用\s*—/.test(dialog?.querySelector('[data-dsh-info="session-sess-idle"]')?.textContent || ''))
+check('busy session still shows its live inflight count',
+  /inflight\s*1/.test(dialog?.querySelector('[data-dsh-info="session-sess-abc123"]')?.textContent || ''),
+  dialog?.querySelector('[data-dsh-info="session-sess-abc123"]')?.textContent || 'missing card')
+{
+  // 删除会话：`/sessions` 变成空列表后，下一轮轮询必须把卡片收掉（不留空壳）。
+  SESSIONS = { sessions: [] }
+  METRICS.pool.sessions = []
+  await settle(1600)
+  const live = rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')
+  check('deleted session card disappears on the next poll',
+    !live?.querySelector('[data-dsh-info^="session-"]'),
+    String(live?.querySelectorAll('[data-dsh-info^="session-"]').length ?? -1) + ' card(s) left')
+}
 check('usage bars drawn for bounded metrics', Boolean(dialog?.querySelector('[data-dsh-rust-monitor-card] div[style*="border-radius: 2px"]')))
 check('no NaN/undefined leak in dialog', !/NaN|undefined/.test(dialog?.textContent || ''))
 await act(async () => {

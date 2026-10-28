@@ -244,13 +244,17 @@ window.__ModuleLoader__.load({
             // Both card feeds are optional: a failed /sessions or /health never costs the
             // metrics ring, it only leaves the previous values (or `—`) in place.
             let feed = null
-            if (withMonitorFeed && (becameReady || ticks % 2 === 0)) {
+            if (withMonitorFeed) {
+              // `/sessions` 每拍都拉：删掉会话后卡片要在 1 秒内消失，隔拍拉会看起来"卡住"。
+              // `/health` 要一次 worker RPC，保持 2 拍；`/cache` 更慢（4 拍）。
+              const wantsHealth = becameReady || ticks % 2 === 0
+              const wantsCache = becameReady || ticks % 4 === 0
               feed = await Promise.all([
                 probeJson('/sessions').catch(() => null),
-                probeJson('/health').catch(() => null),
+                wantsHealth ? probeJson('/health').catch(() => null) : Promise.resolve(null),
                 // The cache view asks the worker for `index.status`, so it rides a
                 // slower cadence than the counters it sits next to.
-                ticks % 4 === 0 ? probeJson('/cache').catch(() => null) : Promise.resolve(null),
+                wantsCache ? probeJson('/cache').catch(() => null) : Promise.resolve(null),
               ])
             }
             ticks += 1
@@ -1195,9 +1199,13 @@ window.__ModuleLoader__.load({
     // 所有卡片共用的两列 label-over-value 网格（grid: repeat(2, minmax(0,1fr))），
     // 高度约为逐字段竖排的一半；字符串值额外写 title，长路径截断后仍可悬停查看。
     /** Two-column label/value grid used by all three card kinds; rows are `[label, value]` pairs. */
-    function InfoCard({ title, subtitle, rows, accent, dot }) {
+    function InfoCard({ title, subtitle, rows, accent, dot, testId }) {
       const list = Array.isArray(rows) ? rows : []
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+      return h('div', {
+        // 测试与无障碍共用的稳定标识（`session-<id>` / `worker-<id>`）；正常渲染不影响布局。
+        'data-dsh-info': testId,
+        style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 },
+      },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
           h('strong', {
             title,
@@ -1425,12 +1433,19 @@ window.__ModuleLoader__.load({
         const value = Number(probe.lastHostSeenMsAgo)
         return Number.isFinite(value) && value >= 0 ? fmtDuration(value) + ' ago' : DASH
       }
+      // 心跳计数：宿主按 worker 记的 ping 次数；缺失时返回 null，卡片只显示"多久之前"。
+      const beatCountOf = (worker, index) => {
+        const raw = worker.beatCount ?? (index === 0 ? health?.worker?.beats : null)
+        const value = Number(raw)
+        return Number.isFinite(value) && value >= 0 ? fmtInt(value) : null
+      }
       return workers.map((entry, index) => {
         const worker = entry || {}
         const inflight = Number(worker.inflight ?? sample?.inflight ?? NaN)
         const queued = Number(worker.queued ?? sample?.queued ?? pool.queueDepth ?? NaN)
         const running = worker.running === false ? false : true
         const workingSet = sample?.workingSetBytes ?? worker.workingSetBytes
+        const beats = beatCountOf(worker, index)
         const rows = [
           ['pid', pidOf(worker, index)],
           [pick('运行', 'uptime'), uptimeOf(worker, index)],
@@ -1438,12 +1453,13 @@ window.__ModuleLoader__.load({
           ['working set', workingSet == null || !Number.isFinite(Number(workingSet)) ? DASH : fmtBytes(workingSet)],
           ['inflight/queued', (Number.isFinite(inflight) ? inflight : DASH) + '/' + (Number.isFinite(queued) ? queued : DASH)],
           [pick('重启', 'restarts'), restartsOf(worker, index)],
-          [pick('心跳', 'heartbeat'), beatOf(index)],
+          [pick('心跳', 'heartbeat'), beatOf(index) + (beats === null ? '' : ' · #' + beats)],
         ]
         return {
           key: 'worker-' + (worker.id ?? index),
           label: 'worker #' + (worker.id ?? index) + ' · pid ' + pidOf(worker, index),
           node: h(InfoCard, {
+            testId: 'worker-' + (worker.id ?? index),
             title: pick('Worker ', 'Worker ') + (worker.id ?? index),
             subtitle: running ? (sample ? '' : pick('无采样', 'no sample')) : pick('空闲', 'idle'),
             accent: running ? MONITOR_COLORS.green : MONITOR_COLORS.red,
@@ -1459,24 +1475,37 @@ window.__ModuleLoader__.load({
      * Detail is honest about being unavailable: without a projection the cache cell stays `—`. */
     function sessionCards(list, details, pool) {
       const rows = Array.isArray(list) ? list : []
+      // 两处来源的 id 形状不同：`/sessions` 是会话目录名（可能带 `session-` 前缀、大小写不一），
+      // `pool.sessions` 是 DSH 传进 `pool.call` 的 sessionId。归一化后再比对，
+      // 否则整列会退化成 `—`（本次修复的第二个根因）。
+      const norm = (value) => String(value ?? '').trim().toLowerCase().replace(/^session-/, '')
       const live = new Map()
       ;(Array.isArray(pool?.sessions) ? pool.sessions : []).forEach((entry) => {
-        if (entry && entry.sessionId) live.set(String(entry.sessionId), entry)
+        if (entry && entry.sessionId) live.set(norm(entry.sessionId), entry)
       })
-      // `/sessions` lists log files; when that route is unavailable the pool still knows which
-      // sessions are calling right now, so the row falls back to live activity instead of
-      // rendering an empty placeholder.
-      const sources = rows.length
-        ? rows
+      // `/sessions` lists log files; when that route has never answered the pool still knows which
+      // sessions are calling right now, so the row falls back to live activity instead of rendering
+      // an empty placeholder. Once the route answers, its list is authoritative: a deleted session
+      // must lose its card on the next poll instead of being resurrected by the pool fallback.
+      const sources = Array.isArray(list)
+        ? list
         : [...live.values()].map((entry) => ({ id: entry.sessionId, mtimeMs: entry.lastSeenAt }))
       return sources.map((entry, index) => {
         const id = String(entry?.id ?? '')
         const short = id.replace(/^session-/, '').slice(0, 8) || pick('会话 ', 'session ') + index
         const detail = details ? details[id] : null
         const counts = detail?.counts ?? null
-        const inflight = live.get(id)
+        const inflight = live.get(norm(id)) ?? null
         const active = Number.isFinite(Number(entry?.mtimeMs)) ? ago(Number(entry.mtimeMs)) : DASH
-        const inflightCount = inflight ? Number(inflight.inflight ?? 0) || 0 : 0
+        // 已知会话一律给数字：没有在途调用就是 0（空闲），`—` 只留给"这个会话根本不认识"。
+        const inflightCount = inflight ? Math.max(0, Number(inflight.inflight ?? 0) || 0) : 0
+        const lastCallMs = inflight && Number.isFinite(Number(inflight.lastCallMs)) ? Number(inflight.lastCallMs) : null
+        const lastSeenAt = inflight && Number.isFinite(Number(inflight.lastSeenAt)) ? Number(inflight.lastSeenAt) : null
+        const lastCall = lastCallMs !== null && lastCallMs > 0
+          ? fmtInt(lastCallMs) + ' ms'
+          : lastSeenAt
+            ? ago(lastSeenAt)
+            : DASH
         const cache = detail?.loading
           ? pick('读取中…', 'loading…')
           : detail && detail.nextCursor != null
@@ -1485,6 +1514,7 @@ window.__ModuleLoader__.load({
         return {
           key: 'session-' + (id || index),
           node: h(InfoCard, {
+            testId: 'session-' + (id || index),
             title: short,
             subtitle: detail?.timings?.mode ? String(detail.timings.mode) : undefined,
             // Green light = this session has a call in flight right now; grey = idle.
@@ -1499,8 +1529,8 @@ window.__ModuleLoader__.load({
               [pick('记录', 'records'), counts && Number.isFinite(counts.records) ? fmtInt(counts.records) : numOrDash(detail?.total)],
               [pick('步骤/轮次', 'steps/turns'), counts ? fmtInt(counts.steps) + '/' + fmtInt(counts.turns) : DASH],
               [pick('活动', 'active'), active],
-              ['inflight', inflight ? String(inflightCount) : DASH],
-              [pick('最近调用', 'last call'), inflight && Number.isFinite(Number(inflight.lastCallMs)) ? fmtInt(inflight.lastCallMs) + ' ms' : DASH],
+              ['inflight', String(inflightCount)],
+              [pick('最近调用', 'last call'), lastCall],
               [pick('投影', 'cache'), cache],
             ],
           }),
@@ -1763,9 +1793,12 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // 输入框下方的一行常驻资源摘要：纯文本、不可交互，拿不到采样时整条不渲染。
+    // 输入框下方的一行常驻资源摘要：整条可点开监控弹窗（Esc 关闭），拿不到采样时整条不渲染。
     function MetricsStrip() {
       const { data, error } = useMetrics(POLL_MS)
+      const [open, setOpen] = useState(false)
+      const [hover, setHover] = useState(false)
+      const [focus, setFocus] = useState(false)
       const last = data?.history?.fast?.slice(-1)[0]
       if (!data || !last) return error ? null : null
       const rss = Math.round((last.workingSetBytes || 0) / (1024 * 1024))
@@ -1791,12 +1824,32 @@ window.__ModuleLoader__.load({
           h('span', { 'data-dsh-rust-metric': index, style: valueStyle(width) }, value),
         ))
       })
-      return h('div', {
-        title: pick('R-Native · dsh-native 实时资源', 'R-Native · dsh-native live resources'),
+      const strip = h('div', {
+        role: 'button',
+        tabIndex: 0,
+        'aria-label': pick('打开 dsh-native 监控面板', 'open the dsh-native monitor'),
+        'data-dsh-rust-strip': 'summary',
+        title: pick('R-Native · dsh-native 实时资源 · 点击查看监控', 'R-Native · dsh-native live resources · click for the monitor'),
+        onClick: () => setOpen(true),
+        onKeyDown: (event) => {
+          // 键盘等价物：Enter 与 Space 都要打开，Space 记得阻止页面滚动。
+          if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+            event.preventDefault()
+            setOpen(true)
+          }
+        },
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
+        onFocus: () => setFocus(true),
+        onBlur: () => setFocus(false),
         style: {
           display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center',
-          fontSize: 11, opacity: 0.62, padding: '2px 4px 4px', fontVariantNumeric: 'tabular-nums',
-          userSelect: 'none', flexWrap: 'wrap',
+          fontSize: 11, opacity: hover || focus ? 0.95 : 0.62, padding: '2px 6px 4px',
+          fontVariantNumeric: 'tabular-nums', userSelect: 'none', flexWrap: 'wrap',
+          cursor: 'pointer', borderRadius: 6,
+          border: '1px solid ' + (hover ? MONITOR_COLORS.border : 'transparent'),
+          boxShadow: focus ? '0 0 0 2px ' + COLORS.accent : 'none',
+          transition: 'opacity 120ms ease, border-color 120ms ease',
         },
       },
         // 小圆点只是粗略提示：单核 CPU 超过 50% 转警告色，其余为正常色。
@@ -1804,6 +1857,8 @@ window.__ModuleLoader__.load({
         h('span', { style: { marginRight: 2 } }, 'R-Native'),
         ...nodes,
       )
+      if (!open) return strip
+      return h(React.Fragment, null, strip, h(MonitorDialog, { onClose: () => setOpen(false) }))
     }
 
     return {

@@ -28,7 +28,7 @@
 
 对外是 **10 个工具 + 8 条 HTTP 路由**，界面是**固定头部的会话投影视图**、**Grafana 风格监控器**和输入框下沿的 **R-Native 资源状态条**。
 
-> 当前版本 **1.7.0**（2026-10-26）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；1.5.0–1.6.x 以 scope 发布为 `@keer1024/dsh-native`，**1.7.0 起恢复无 scope 的 `dsh-native`**；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。
+> 当前版本 **1.7.1**（2026-10-28）。1.4.0 起包名由 `dsh-flash` 改为 `dsh-native`；1.5.0–1.6.x 以 scope 发布为 `@keer1024/dsh-native`，**1.7.0 起恢复无 scope 的 `dsh-native`**；工具名 `rust_*`、路由前缀 `/api/dsh-rust-exec/*`、worker 镜像名 `dsh-rust-worker.exe` 保持不变，以免破坏既有配置与已装用户。1.7.1 只动监控卡片：心跳计数器、状态条可点开监控、会话行不再退化成 `—`。
 >
 > 1.6.1 同时带来：worker 镜像搬到 `%LOCALAPPDATA%\dsh-native\bin`（摆脱 DSH 沙箱给工作区 exe 打的 Low IL 标签）、异步启动（DSH 先开，worker 延迟 1.2 s 拉起，`readiness` 状态机就绪后前端自动刷新）、监控器三行卡片重设计，以及本轮的**全量中文注释**与 `tools/build_plugin.mjs` 构建脚本（产物落根目录 `bin/`）。
 >
@@ -104,10 +104,10 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\dsh-native-1.7.0.tgz -Algorithm SHA256
-# 与 bin\dsh-native-1.7.0.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\dsh-native-1.7.1.tgz -Algorithm SHA256
+# 与 bin\dsh-native-1.7.1.tgz.sha256 里的摘要比对
 
-npm i .\bin\dsh-native-1.7.0.tgz
+npm i .\bin\dsh-native-1.7.1.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见
@@ -300,9 +300,9 @@ worker 镜像、完整性判定和日志路径。
 
 **监控器**（Grafana 风格浮层，`Esc` 或点遮罩关闭）：自上而下**三行卡片**，每行横向不换行，超出部分横向滚动、右缘渐隐并给 `+N` 提示；卡片是紧凑两列网格（标签在上、值在下，值带 `title` 可看全文）。
 
-- **Workers 行**：每个 worker 一张卡（pid / uptime / inflight·lanes / 队列 / 重启次数），可点选；标题圆点跟随 `readiness.phase` 变色（就绪绿、未运行红、启动中橙）。
+- **Workers 行**：每个 worker 一张卡（pid / uptime / inflight·lanes / 队列 / 重启次数 / **心跳**），可点选；心跳格是 `2s ago · #128`（`#N` 是该 worker 启动以来发出的 ping 帧数，来自 `/metrics.workers[i].beatCount`，重启归零）；标题圆点跟随 `readiness.phase` 变色（就绪绿、未运行红、启动中橙）。
 - **曲线组**：紧贴在 Workers 行下方，8 张 sparkline 卡（CPU 单核、工作集、私有字节、句柄、队列深度、运行中、索引文件数、索引符号数），数据取 `/metrics.workers[i].history`；多 worker 时随选中的卡片切换，标题带 `worker #id · pid …`。
-- **Sessions 行**：每个会话一张卡（inflight、calls、最近调用 ms、最近活动），右上角圆点表示是否正在通信（`inflight > 0` 绿、空闲灰，圆点带 `aria-label`/`title`，不单靠颜色）；`/sessions` 为空时回退用 `/metrics.pool.sessions`。
+- **Sessions 行**：每个会话一张卡（inflight、calls、最近调用 ms、最近活动），右上角圆点表示是否正在通信（`inflight > 0` 绿、空闲灰，圆点带 `aria-label`/`title`，不单靠颜色）。空闲会话显示 `inflight 0`（不是 `—`），`最近调用` 没有毫秒值时退化成 `N ago`；`/sessions` 还没答过时用 `/metrics.pool.sessions` 兜底，**答过之后以 `/sessions` 为准**：DSH 里删掉会话，下一轮 1 s 轮询就把卡片收掉。
 - **Cache 行**：单张卡，上半是宿主读缓存（entries/limit、hits/misses、字节、TTL），下半是 worker 索引（files/symbols、buildMs、reused/parsed），数据来自 `/cache`。
 - `readiness` 没到 `ready` 时，Workers/Sessions 行显示「启动中…」，曲线区显示「等待采样…」；一旦就绪，前端立刻补拉 `/metrics`、`/sessions`、`/cache`，不需要手动刷新。
 - `extremes` 与曲线环都由宿主在内存里累计：**DSH 重启清零，刷新页面不丢**。
@@ -331,7 +331,9 @@ worker 镜像、完整性判定和日志路径。
 ● R-Native  CPU:  0%  -  RSS: 26M  -  运行中: 1  -  队列: 0
 ```
 
-`title` 为 `R-Native · dsh-native 实时资源`。采样失败时保留上一次值，不闪 `NaN`。
+`title` 为 `R-Native · dsh-native 实时资源 · 点击查看监控`。**整条可点击**（`role="button"`、
+`tabIndex=0`，Enter/Space 等效，hover 显示边框、聚焦有焦点环）：点一下就地打开监控器弹窗，
+`Esc` 关闭，不新开页面也不 `location.reload`。采样失败时保留上一次值，不闪 `NaN`。
 
 数值用等宽数字（`tabular-nums` / `"tnum"`）并各自占一个**固定 `ch` 宽度的右对齐槽位**
 （CPU `4ch`、RSS `5ch`、运行中 `2ch`、队列 `2ch`）。只开等宽数字不够：`0% → 100%`、`9M →

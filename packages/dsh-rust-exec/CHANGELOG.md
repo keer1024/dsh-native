@@ -2,6 +2,44 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.1 — 2026-10-28
+
+Monitoring cards only: three fixes reported from the panel (heartbeat counter, a click target for the
+status strip, and session rows that had degraded to `—`). No wire-protocol, tool-schema or worker
+binary change.
+
+### Added — a heartbeat counter on the worker card
+- `RustWorker` counts the `ping` frames it actually sends (`#beats`, exposed as the `beatCount`
+  getter) and reports it in `health().local.beats`; `WorkerPool.#workerInfo()` copies it into
+  `workersDetail[].beatCount`, so `/metrics` and `rust_health` carry it.
+- The worker card renders `2s ago · #128` in the heartbeat cell. Without the field it falls back to
+  the bare age instead of printing `#—`.
+
+### Added — the composer status strip opens the monitor
+- `MetricsStrip` is now a `role="button"` element (`tabIndex=0`, Enter/Space handled, hover border,
+  focus ring) that opens the existing `MonitorDialog` in place. No new page, no `location.reload`;
+  Escape still closes it.
+
+### Fixed — session rows no longer degrade to `—`
+- `WorkerPool.info()` listed only sessions with in-flight calls, so an idle session disappeared from
+  `pool.sessions` and every cell of its card became `—`. Sessions now come from the union of the
+  in-flight table and the 30-minute statistics table, with `inflight: 0` for idle ones.
+- `sessionCards()` had two id-shape mismatches: `/sessions` returns the session **directory name**
+  (possibly `session-`-prefixed, differently cased) while `pool.sessions` carries the DSH sessionId.
+  Both sides are normalised before matching, `inflight` shows a real `0` instead of a dash, and the
+  last-call cell falls back from `N ms` to `N ago`.
+- Once `/sessions` has answered, its list is authoritative: a deleted session loses its card on the
+  next poll instead of being resurrected by the pool fallback. `/sessions` is now polled on every
+  tick (the dialog already ran at 1 Hz), so a deletion clears within a second.
+- `pool.sessions` entries in `WorkerPool.info()` are TTL-filtered (30 min) so ended sessions cannot
+  accumulate forever.
+
+### Tests
+- `tools/monitor_render_test.mjs` reads `client.js` from its own repository (deps still resolve from
+  the dev workspace) and adds five assertions: heartbeat counter, strip is a keyboard-reachable
+  button, strip click opens the dialog, idle session shows `inflight 0`, and a deleted session's
+  card disappears on the next poll. 37 assertions, all pass.
+
 ## 1.7.0 — 2026-10-26
 
 Package identity only: the npm name goes back to the unscoped **`dsh-native`**. No runtime, wire
