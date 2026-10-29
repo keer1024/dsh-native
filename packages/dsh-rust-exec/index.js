@@ -68,10 +68,15 @@ const SEARCH_TIMEOUT_MS = 60_000
 // later opens cheap, so this only bounds the worst-case first open.
 const SESSION_TIMEOUT_MS = 120_000
 // 节省口径（只放实测常量，不做运行期重算——每条 schema 现算 tiktoken 太贵）：
-// 1.4.1 十个工具全常驻 1,812 tok/请求 → 1.6+ 五个常驻 719（cl100k_base 代理分词，计划 §3.1）；
-// 单条结果行的实测差见 §3.5：read 59→26 / write 48→22 / edit 47→25 / stat 66→35 / exec 22→9。
+// 对照基线是 **DSH 原生**，不是本插件的旧版本：原生 0.2.1-rc.3 里与 rust_* 一对一的六个工具
+// （read/write/edit/glob/grep/pwsh）实测合计 1,583 tok/请求 → 当前常驻五工具 719
+// （cl100k_base，逐工具 `JSON.stringify({name,description,parameters})` 后求和，量法见
+// docs/rust-exec-plugin/NATIVE_SCHEMA_2026-10-29.md）。str_replace_editor 不在 dsh-base 的默认
+// 工具面里，故不计；read_image/todo/web 等本插件没有替代，也不计。
+// 单条结果行的实测差见计划 §3.5：read 59→26 / write 48→22 / edit 47→25 / stat 66→35 / exec 22→9。
 // 这些数字是"下界"：错误重试减少、compact 读取等额外收益没有计入。
-const SAVINGS_PER_TURN_BASELINE = 1812
+const SAVINGS_NATIVE_TOOLS = { read: 99, write: 174, edit: 234, glob: 166, grep: 152, pwsh: 758 }
+const SAVINGS_PER_TURN_BASELINE = Object.values(SAVINGS_NATIVE_TOOLS).reduce((sum, n) => sum + n, 0)
 const SAVINGS_PER_TURN_RESIDENT = 719
 /** 输出 token 吞吐只用于把节省折算成「估算秒数」，不是实测的模型速度（可配，见 §15.3）。 */
 const SAVINGS_OUTPUT_TOK_PER_S = 45
@@ -2869,8 +2874,9 @@ class MetricsStore {
         outputTokPerSec: SAVINGS_OUTPUT_TOK_PER_S,
         indexBaselineMs: SAVINGS_INDEX_BASELINE_MS,
         perCall: { ...SAVINGS_PER_CALL },
+        nativeTools: { ...SAVINGS_NATIVE_TOOLS },
         basis: 'lower-bound',
-        note: '每轮固定取 1.4.1 实测下界；调用面只计已实测六类；省时按 45 tok/s 估算',
+        note: '每轮固定对照 DSH 原生同功能工具面（read/write/edit/glob/grep/pwsh = 1,583，cl100k 实测）；调用面只计已实测六类；省时按 45 tok/s 估算',
         sessions: sessionsOut,
       }
     } catch {

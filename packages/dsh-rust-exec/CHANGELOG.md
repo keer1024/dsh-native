@@ -2,6 +2,30 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.4 — 2026-10-29
+
+Report-only release: the savings row now measures itself against **DSH's own tool schemas** instead of
+this plugin's 1.4.1. No tool schema, wire-protocol, route or worker-binary change.
+
+### Changed — native baseline for the per-request saving
+- `fixedPerTurn` is now `1583 − 719 = 864` tok. The old `1093` came from comparing the plugin with its
+  own 1.4.1 (ten resident tools, 1,812 tok), which is a version-to-version delta, not a native one.
+- The 1,583 is measured, not estimated: the runtime was unpacked from the installed
+  `app.asar` (`@deepseek-ai/dsh-desktop-runtime` 0.2.1-rc.3), every `dsh-tool-*/lib/index.js` was
+  loaded with a stub `ctx`, and each `defineTool({ name, description, parameters })` was tokenised with
+  cl100k_base exactly like the 1,812 / 719 figures were. Per-tool: `read 99 / write 174 / edit 234 /
+  glob 166 / grep 152 / pwsh 758`; all 34 native tools of this profile total 6,045.
+- Why the six and not all 34: the plugin registers **in addition to** the native tools (nothing is
+  unregistered), so only the tools `rust_*` actually stands in for are a fair subtraction;
+  `str_replace_editor` is excluded because `dsh-base` does not enable that package in this profile.
+  Full method and the per-tool table: `docs/rust-exec-plugin/NATIVE_SCHEMA_2026-10-29.md`.
+- `/metrics.savings` now also returns `nativeTools` (the per-tool table) and a `note` naming the native
+  surface, so the number can be audited from the endpoint alone (`schema` stays `…/savings@1`).
+- `client.js`: the per-request card's subtitle reads `原生 1,583 → 当前 719` (`native 1,583 → now 719`);
+  the no-payload fallback constant moved 1093 → 864.
+- `tools/monitor_render_test.mjs`: fixtures and assertions follow (864, 11,257 tok total), plus a new
+  assertion that the subtitle says 1,583 and never 1,812. 48 PASS / 0 FAIL.
+
 ## 1.7.3 — 2026-10-28
 
 Report-only release: the monitor dialog gains a savings row. No tool schema, wire-protocol, route or

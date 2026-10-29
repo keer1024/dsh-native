@@ -1726,7 +1726,7 @@ window.__ModuleLoader__.load({
           textTransform: 'uppercase', letterSpacing: 0.3, whiteSpace: 'nowrap',
         },
       }, 'est')
-      const fixed = savings?.fixedPerTurn ?? (savings ? 1093 : null)
+      const fixed = savings?.fixedPerTurn ?? (savings ? 864 : null)
       const baseline = savings?.baselinePerTurn ?? null
       const resident = savings?.residentPerTurn ?? null
       const turns = savings?.turns ?? null
@@ -1742,7 +1742,7 @@ window.__ModuleLoader__.load({
           node: h(InfoCard, {
             testId: 'savings-fixed',
             title: pick('每轮固定', 'per request'),
-            subtitle: baseline != null && resident != null ? '1.4.1 ' + fmtInt(baseline) + ' → ' + pick('当前 ', 'now ') + fmtInt(resident) : DASH,
+            subtitle: baseline != null && resident != null ? pick('原生 ', 'native ') + fmtInt(baseline) + ' → ' + pick('当前 ', 'now ') + fmtInt(resident) : DASH,
             accent: MONITOR_COLORS.green,
             rows: [
               [pick('固定节省', 'fixed saving'), fixed == null ? DASH : fmtInt(fixed) + ' tok'],

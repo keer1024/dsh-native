@@ -100,21 +100,22 @@ const METRICS = {
       { sessionId: 'sess-3mo', inflight: 0, busy: false, calls: 6, lastCallMs: 0, lastTool: 'exec', lastSeenAt: Date.now() - 92 * 86400_000 },
     ],
   },
-  // 节省报表（§15）：固定 1,093/轮 + 调用面（exec 20×13 + read 12×33 + stat 5×31 + write 3×26 = 889）。
+  // 节省报表（§15）：固定 864/轮（原生同功能 1,583 − 常驻 719）+ 调用面（exec 20×13 + read 12×33 + stat 5×31 + write 3×26 = 889）。
   savings: {
     schema: 'dsh-rust-exec/savings@1',
-    baselinePerTurn: 1812, residentPerTurn: 719, fixedPerTurn: 1093,
+    baselinePerTurn: 1583, residentPerTurn: 719, fixedPerTurn: 864,
     turns: 12, calls: 40,
     byTool: { exec: 20, read: 12, stat: 5, write: 3 },
-    callTokens: 889, savedTokens: 14005, savedSeconds: 311,
+    callTokens: 889, savedTokens: 11257, savedSeconds: 250,
     outputTokPerSec: 45, indexBaselineMs: 171,
     perCall: { read: 33, write: 26, edit: 22, stat: 31, exec: 13, ls: 0, search: 0, symbols: 0, session_open: 0, health: 0 },
+    nativeTools: { read: 99, write: 174, edit: 234, glob: 166, grep: 152, pwsh: 758 },
     basis: 'lower-bound',
-    note: '每轮固定取 1.4.1 实测下界；调用面只计已实测六类；省时按 45 tok/s 估算',
+    note: '每轮固定对照 DSH 原生同功能工具面（read/write/edit/glob/grep/pwsh = 1,583，cl100k 实测）；调用面只计已实测六类；省时按 45 tok/s 估算',
     sessions: [
-      { sessionId: 'sess-abc123', turns: 5, calls: 7, savedTokens: 5869, lastSeenAt: Date.now() - 3000, counted: true },
-      { sessionId: 'sess-idle', turns: 4, calls: 3, savedTokens: 4586, lastSeenAt: Date.now() - 9000, counted: true },
-      { sessionId: 'sess-old', turns: 3, calls: 4, savedTokens: 3439, lastSeenAt: Date.now() - 20 * 3600_000, counted: true },
+      { sessionId: 'sess-abc123', turns: 5, calls: 7, savedTokens: 5724, lastSeenAt: Date.now() - 3000, counted: true },
+      { sessionId: 'sess-idle', turns: 4, calls: 3, savedTokens: 3670, lastSeenAt: Date.now() - 9000, counted: true },
+      { sessionId: 'sess-old', turns: 3, calls: 4, savedTokens: 2752, lastSeenAt: Date.now() - 20 * 3600_000, counted: true },
     ],
   },
 }
@@ -285,8 +286,12 @@ check('monitor dialog height drops to 75vh',
 // §15 节省报表：固定节省是实测常量，累计/省时/索引加速各有自己的口径与降级方式。
 {
   const savingsCard = (id) => dialog?.querySelector(`[data-dsh-info="${id}"]`)?.textContent || ''
-  check('savings row renders the measured per-request saving', /1,?093/.test(savingsCard('savings-fixed')), savingsCard('savings-fixed'))
-  check('savings total reports tokens and turns', /14k|14,005|13\.1k|13k/.test(savingsCard('savings-total')) && /12/.test(savingsCard('savings-total')), savingsCard('savings-total'))
+  check('savings row renders the measured per-request saving', /864/.test(savingsCard('savings-fixed')), savingsCard('savings-fixed'))
+  // 基线必须是 DSH 原生同功能工具面（1,583），不是本插件 1.4.1 的 1,812。
+  check('savings baseline is the native tool surface, not 1.4.1',
+    /原生 1,?583 → 当前 719|native 1,?583 → now 719/.test(savingsCard('savings-fixed')) && !/1,?812/.test(savingsCard('savings-fixed')),
+    savingsCard('savings-fixed').slice(0, 60))
+  check('savings total reports tokens and turns', /11\.3k|11,257|11k/.test(savingsCard('savings-total')) && /12/.test(savingsCard('savings-total')), savingsCard('savings-total'))
   check('index speedup uses the live buildMs against the 171 ms baseline', /92 ms/.test(savingsCard('savings-index')), savingsCard('savings-index'))
   const bar = dialog?.querySelector('[data-dsh-savings-bar]')
   const widths = bar ? [...bar.children].map((node) => parseFloat(node.style.width) || 0) : []
