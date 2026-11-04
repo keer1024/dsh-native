@@ -3,7 +3,7 @@
 // 职责（通过 ctx.slots 挂三个 slot，彼此独立注册）：
 //   1. settings.plugins.tab       -> RustExecPanel：配置、运行状态与「监控器」入口；
 //   2. conversation.view          -> RustConversationView（会话投影只读浏览器）；
-//   3. conversation.composer.dock -> MetricsStrip：输入框下方一行 R-Native 资源摘要。
+//   3. conversation.composer.dock -> MetricsStrip：输入框下方一行 dsh-native 资源摘要。
 // 数据面：probeJson / useMetrics 轮询插件自己的 /metrics、/health、/sessions、/cache，
 // 由 readiness.phase 状态机决定何时显示占位符、何时立即补齐数据。
 //
@@ -1043,7 +1043,7 @@ window.__ModuleLoader__.load({
           style: { flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 8, borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' },
         },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
-            h('strong', null, pick('R-Native 视图', 'R-Native view')),
+            h('strong', null, 'dsh-native'),
             h('span', { style: { opacity: 0.6 } }, (counts.messages != null ? counts.messages : rows.length) + ' ' + pick('条消息', 'messages')),
             counts.toolCalls != null ? h('span', { style: { opacity: 0.6 } }, counts.toolCalls + ' ' + pick('次工具调用', 'tool calls')) : null,
             needle || kindFilter !== 'all' || toolFilter
@@ -2021,7 +2021,7 @@ window.__ModuleLoader__.load({
         tabIndex: 0,
         'aria-label': pick('打开 dsh-native 监控面板', 'open the dsh-native monitor'),
         'data-dsh-rust-strip': 'summary',
-        title: pick('R-Native · dsh-native 实时资源 · 点击查看监控', 'R-Native · dsh-native live resources · click for the monitor'),
+        title: pick('dsh-native · 实时资源 · 点击查看监控', 'dsh-native · live resources · click for the monitor'),
         onClick: () => setOpen(true),
         onKeyDown: (event) => {
           // 键盘等价物：Enter 与 Space 都要打开，Space 记得阻止页面滚动。
@@ -2046,7 +2046,7 @@ window.__ModuleLoader__.load({
       },
         // 小圆点只是粗略提示：单核 CPU 超过 50% 转警告色，其余为正常色。
         h('span', { style: { width: 6, height: 6, borderRadius: 99, background: (last.cpuPctOneCore || 0) > 50 ? COLORS.warn : COLORS.ok, display: 'inline-block' } }),
-        h('span', { style: { marginRight: 2 } }, 'R-Native'),
+        h('span', { style: { marginRight: 2 } }, 'dsh-native'),
         ...nodes,
       )
       if (!open) return strip
@@ -2079,7 +2079,7 @@ window.__ModuleLoader__.load({
             name: 'conversation.view',
             id: 'dsh-native-view',
             order: 20,
-            label: () => pick('dsh-native 视图', 'dsh-native view'),
+            label: () => 'dsh-native',
           }, RustConversationView))
         } catch {
           // View slot unavailable: conversation rendering is untouched.

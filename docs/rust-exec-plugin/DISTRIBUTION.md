@@ -83,11 +83,11 @@ tar -tzf bin\dsh-native-1.7.0.tgz        # 正好 11 个文件
 | 检查 | 期望 |
 | --- | --- |
 | 设置页 → 插件 | 出现 `dsh-native` 标签页，顶部只有「刷新」「监控器」两个按钮 |
-| 输入框下沿状态条 | `● R-Native  CPU: 0%  -  RSS: 26M  -  运行中: 1  -  队列: 0`，两位数变化时其他项不位移 |
-| `GET /api/dsh-rust-exec/health` | 200，含 `hostPid`、`worker.pid`、`routes: 7` |
-| 工具列表 | `rust_exec`、`rust_read`、`rust_search`、`rust_symbols`、`rust_session_open` 等 |
-| 会话页 `R-Native 视图` | 顶部栏与右侧 420px 详情固定，只有消息列表滚动；类别为下拉 |
-| 监控器 | 卡片显示当前值 + min/max + sparkline；Workers / 活动会话两张表 |
+| 输入框下沿状态条 | `● dsh-native  CPU: 0%  -  RSS: 26M  -  运行中: 1  -  队列: 0`，两位数变化时其他项不位移 |
+| `GET /api/dsh-rust-exec/health` | 200，含 `hostPid`、`worker.pid`、`routes: 8` |
+| 工具列表 | `rust_exec`、`rust_read`、`rust_search`、`rust_symbols`、`rust_session_open` 等，共 11 个（5 常驻 + 6 按需激活） |
+| 会话页 `dsh-native` 页签 | 顶部栏与右侧 420px 详情固定，只有消息列表滚动；类别为下拉 |
+| 监控器 | 三行卡片（Workers / Sessions / Cache）+ 跟随选中 worker 的曲线组 + 节省报表 |
 | 重启 DSH | 不出现 `web boot: 1 entry did not activate` / `duplicate factory registration` |
 
 ## 4. 常见问题
@@ -108,6 +108,21 @@ tar -tzf bin\dsh-native-1.7.0.tgz        # 正好 11 个文件
 2. 停掉占用 exe 的 worker：`Get-Process dsh-rust-worker -ErrorAction SilentlyContinue | Stop-Process -Force`。
 3. 覆盖 `bin/dsh-rust-worker.exe` 时若报「正由另一进程使用」，先 `Move-Item` 改名为 `.old` 再复制（Windows 允许重命名运行中的镜像）。
 4. 目标机 `pnpm install`（新 tarball）→ 重启 DSH。
-5. 回滚＝把 `dist` 里上一版 tarball 重新装上，`version` 回退同样的三处引用。
+5. 回滚＝`git checkout v<旧版本>` 后按同样步骤重新打包（历史二进制与包都在对应的 git tag 里；本地不保留旧包）。
 
 **exe 的 sha256 才是契约**：包版本可能因文档改动而变，worker 换没换只看 §0 的 exe 指纹。
+
+## 6. 本地产物与存储策略（只留最新）
+
+同一份东西只留一个副本，历史一律交给 git tag：
+
+| 路径 | 内容 | 规则 |
+| --- | --- | --- |
+| `bin/`（仓库根） | 当前版本安装包 `dsh-native-<version>.tgz` + `.sha256` | **只留当前版本**，随仓库提交；`publish()` 每次清掉旧包 |
+| `dist/` | 同一份包的本地归档 | **只留当前版本**（与 `bin/` 内容相同）；历史版本从对应 tag 重建 |
+| `packages/dsh-rust-exec/bin/` | `dsh-rust-worker.exe` | **只留这一个**；换装产生的 `dsh-rust-worker-<版本>[-N].exe`、`*.old` 由 `pruneWorkerBackups()` 在每次构建后删除 |
+| `packages/dsh-rust-worker/sources/target/` | Cargo 构建缓存（约 100 MB） | 可再生，随时可删；只在需要重新编译时保留 |
+| `.tmp/` | 构建临时目录（`TMP`/`TEMP` 重定向） | 已 gitignore，可随时清空 |
+
+判定口径：**能由 `git tag` + 一条命令重建的，本地一份都不留。** 构建脚本已经把这条规则写进流程——`publish()` 清 `bin/` 与 `dist/`，`pruneWorkerBackups()` 清旧镜像；手工清理只需删 `target/`。
+

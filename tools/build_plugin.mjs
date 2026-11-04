@@ -7,8 +7,8 @@
 //      不能被覆盖，但可以被改名，所以先把旧文件备份成
 //      dsh-rust-worker-<版本>[-N].exe，再拷新文件进去；
 //   3. 在 packages/dsh-rust-exec 里执行 npm pack，打出安装包（tarball）；
-//   4. 把 tarball 放到项目根目录的 bin/（只保留最新一份），同时归档到 dist/，
-//      两边都写 .sha256 校验文件；
+//   4. 把 tarball 放到项目根目录的 bin/ 与 dist/，两边都只保留当前版本（历史版本在 git
+//      tag 与 CHANGELOG 里），并各写一份 .sha256 校验文件；顺手清掉 bin/ 里的旧镜像备份；
 //   5. 打印版本、大小、哈希、文件数等摘要，可直接粘进发布说明。
 //
 // 用法：
@@ -180,6 +180,29 @@ function installWorker(version) {
 }
 
 /**
+ * 只保留当前 worker 镜像：清掉 `dsh-rust-worker-<版本>[-N].exe` 备份与 `*.old`。
+ *
+ * 备份只是换装瞬间的保险（Windows 不允许覆盖运行中的 exe），不是发布物；
+ * 每次构建都留着会让 bin/ 线性膨胀，而真正需要回滚时 git 里也有历史二进制。
+ * @returns {string[]} 被删掉的文件名
+ */
+function pruneWorkerBackups() {
+  const dir = path.join(EXEC_DIR, 'bin');
+  if (!existsSync(dir)) return [];
+  const removed = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry === WORKER_NAME) continue;
+    const isVersionedBackup = /^dsh-rust-worker-.+\.exe$/i.test(entry);
+    const isOldCopy = entry.endsWith('.old');
+    if (!isVersionedBackup && !isOldCopy) continue;
+    rmSync(path.join(dir, entry), { force: true });
+    removed.push(entry);
+  }
+  if (removed.length > 0) log(`已清理旧镜像：${removed.join(', ')}`);
+  return removed;
+}
+
+/**
  * 在宿主包目录执行 npm pack，产出 tarball。
  *
  * 加 --ignore-scripts：打包阶段不该触发任何生命周期脚本。
@@ -256,6 +279,19 @@ function publish(produced, archive) {
   writeFileSync(path.join(BIN_DIR, `${name}.sha256`), `${hash}  ${name}\n`, 'utf8');
 
   if (archive) {
+    // dist/ 与 bin/ 同一条规则：只留当前版本。历史包在 git tag 与 CHANGELOG 里可重建，
+    // 本地再堆一份只会让目录越来越难扫。清理放在 copy 之前，失败时不会留下半套归档。
+    for (const entry of readdirSync(DIST_DIR)) {
+      if (entry.endsWith('.tgz') && entry !== name) {
+        rmSync(path.join(DIST_DIR, entry), { force: true });
+        rmSync(path.join(DIST_DIR, `${entry}.sha256`), { force: true });
+      }
+    }
+    for (const entry of readdirSync(DIST_DIR)) {
+      if (!entry.endsWith('.tgz.sha256')) continue;
+      const owner = entry.slice(0, -'.sha256'.length);
+      if (!existsSync(path.join(DIST_DIR, owner))) rmSync(path.join(DIST_DIR, entry), { force: true });
+    }
     copyFileSync(target, path.join(DIST_DIR, name));
     writeFileSync(path.join(DIST_DIR, `${name}.sha256`), `${hash}  ${name}\n`, 'utf8');
   }
@@ -298,6 +334,7 @@ function main() {
   const produced = packTarball(version);
   const outcome = publish(produced, !noArchive);
   rmSync(produced, { force: true });
+  pruneWorkerBackups();
 
   const files = listTarball(outcome.file);
   log('构建完成');
@@ -306,7 +343,7 @@ function main() {
   log(`  sha256：${outcome.hash}`);
   log(`  文件数：${files.length}`);
   if (noArchive) log('  归档  ：已跳过（--no-archive）');
-  log('提示：bin/ 恒为最新一份；dist/ 按版本归档。');
+  log('提示：bin/ 与 dist/ 都只留当前版本；旧 worker 镜像备份已随本次构建清理。');
 }
 
 try {

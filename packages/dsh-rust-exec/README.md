@@ -33,7 +33,7 @@ A healthy answer contains `ok: true`, the worker pid and the mounted route count
 |---|---|
 | Tools | resident: `rust_exec`, `rust_read`, `rust_search`, `rust_health`, `native_help`; activated on demand: `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_symbols`, `rust_session_open` |
 | Routes | `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config,cache}` |
-| UI | pinned-header session projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor with one card row each for workers, sessions and cache, `R-Native` resource strip |
+| UI | pinned-header session projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor with one card row each for workers, sessions and cache, `dsh-native` resource strip |
 | Worker | warm PowerShell lanes (default 4, max 16), session affinity, soft RSS/CPU limits, watchdog against host exit, disk-persisted code index (parallel parse) |
 
 ## Requirements

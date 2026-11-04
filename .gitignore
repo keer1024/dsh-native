@@ -1,4 +1,5 @@
-# build artifacts
+# build artifacts — local copies only, each keeps the current version
+# (see docs/rust-exec-plugin/DISTRIBUTION.md §6)
 dist/
 target/
 *.old

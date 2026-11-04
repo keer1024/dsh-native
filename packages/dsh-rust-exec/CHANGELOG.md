@@ -2,6 +2,31 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.5 — 2026-11-04
+
+Housekeeping release: one visible label change, a README rewrite, and a storage rule that keeps the
+repository to one copy of each artifact. No tool schema, route, wire-protocol or worker-binary change.
+
+### Changed — one label for the plugin's own name
+- The composer status strip, its tooltip, the conversation-view header and the conversation-view tab
+  label now all read `dsh-native`. Previously the strip said `R-Native`, the tooltip said
+  `R-Native · dsh-native 实时资源 · 点击查看监控`, and the tab said `dsh-native 视图` — three names for
+  the same plugin in one screen. `monitor_render_test` asserts the new label and the absence of the
+  legacy one.
+
+### Docs — README reduced to current usage
+- Root `README.md` rewritten around install / upgrade / tools / routes / config / troubleshooting;
+  the per-release narrative, the UI-detail sections, the benchmark tables and the directory listing
+  are gone. Counts are corrected to 11 tools (10 `rust_*` plus `native_help`) and 8 routes; the
+  locale and `package.json` descriptions said 7 routes.
+- `docs/rust-exec-plugin/DISTRIBUTION.md` acceptance table and `PUBLISHING.md` follow the same wording.
+
+### Changed — artifacts keep only the current version
+- `build_plugin.mjs` prunes `dist/` to the current tarball (it used to accumulate every release) and
+  deletes the `dsh-rust-worker-<version>[-N].exe` / `*.old` backups after each build, so
+  `packages/dsh-rust-exec/bin/` holds exactly one binary. Rule documented in
+  `DISTRIBUTION.md §6`: anything reproducible from a git tag is not kept locally.
+
 ## 1.7.4 — 2026-10-29
 
 Report-only release: the savings row now measures itself against **DSH's own tool schemas** instead of

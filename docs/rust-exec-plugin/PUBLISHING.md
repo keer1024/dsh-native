@@ -101,8 +101,8 @@ url: https://github.com/<owner>/<repo>
 name: <owner>/<repo>
 category: tools
 description:
-  en: 'dsh-native: a resident Rust worker handles command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; the host stays a thin JSON-RPC, lane-scheduling, 7-route layer. The UI adds a pinned-header projection view with fuzzy filtering and a fixed 420 px detail pane, a Grafana-style monitor with lifetime min/max and sparklines, and the R-Native resource strip.'
-  zh: 'dsh-native：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 7 条 HTTP 路由。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器（生命周期 min/max + sparkline）和 R-Native 资源状态条。'
+  en: 'dsh-native: a resident Rust worker handles command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; the host stays a thin JSON-RPC, lane-scheduling, 8-route layer and exposes 11 tools (10 rust_* plus native_help). The UI adds a pinned-header projection view with fuzzy filtering and a fixed 420 px detail pane, a Grafana-style monitor, and the dsh-native resource strip.'
+  zh: 'dsh-native：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 8 条 HTTP 路由，对外 11 个工具（10 个 rust_* 加 native_help）。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器和 dsh-native 资源状态条。'
 npm: @keer1024/dsh-native   # 发了 npm 才写；否则删掉这行
 # tarball: https://github.com/keer1024/dsh-native/releases/download/v1.5.1/keer1024-dsh-native-1.5.1.tgz
 screenshots:
@@ -121,11 +121,11 @@ screenshots:
 ```powershell
 # 市场安装 → 重启 → 验收
 node tools\check_client_identity.mjs
-node tools\live_route_check.mjs          # 7 条路由 + 10 个工具
+node tools\live_route_check.mjs          # 8 条路由 + 11 个工具
 ```
 
 浏览器里逐项确认：设置页 `dsh-native` 标签页、监控器浮层（数字卡片 + 生命周期 min/max + sparkline）、会话投影视图、
-`R-Native` 状态条；再确认**重启一次 DSH 不报 `web boot: … entry did not activate`**
+`dsh-native` 状态条；再确认**重启一次 DSH 不报 `web boot: … entry did not activate`**
 （这是 1.2.1 修掉的问题，回归必查）。
 
 ## 5. 维护
