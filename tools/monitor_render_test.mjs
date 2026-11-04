@@ -177,17 +177,17 @@ const unmount = async () => {
 }
 
 console.log('\n=== registration contract ===')
-check('settings tab registered as dsh-native', Boolean(byId('dsh-native')) && byId('dsh-native').options.name === 'settings.plugins.tab')
+check('settings tab registered as dsh-rust-exec', Boolean(byId('dsh-rust-exec')) && byId('dsh-rust-exec').options.name === 'settings.plugins.tab')
 check('no panel-rail entries left', !registrations.some((r) => r.options.name === 'sidebar.panellist'), JSON.stringify(registrations.map((r) => r.options.name)))
-check('composer-dock strip registered', Boolean(byId('dsh-native-strip')) && byId('dsh-native-strip').options.name === 'conversation.composer.dock')
+check('composer-dock strip registered', Boolean(byId('dsh-rust-exec-strip')) && byId('dsh-rust-exec-strip').options.name === 'conversation.composer.dock')
 check('both use additive list slots', ['settings.plugins.tab', 'conversation.composer.dock'].every((name) => name !== 'root'))
 
 console.log('\n=== ambient strip (composer dock) ===')
-await render(byId('dsh-native-strip').Component)
+await render(byId('dsh-rust-exec-strip').Component)
 console.log('  text:', text().slice(0, 160))
-check('strip label is dsh-native', /^dsh-native/.test(text()), text().slice(0, 40))
+check('strip label is dsh-rust-exec', /^dsh-rust-exec/.test(text()), text().slice(0, 40))
 check('strip has no legacy R-Native label', !/R-Native/.test(text()), text().slice(0, 40))
-check('strip hint names dsh-native', /^dsh-native · /.test(rootEl.querySelector('[title]')?.getAttribute('title') || ''), rootEl.querySelector('[title]')?.getAttribute('title') || '')
+check('strip hint names dsh-rust-exec', /^dsh-rust-exec · /.test(rootEl.querySelector('[title]')?.getAttribute('title') || ''), rootEl.querySelector('[title]')?.getAttribute('title') || '')
 check('strip shows CPU percentage', /CPU:\s*12%/.test(text()), text().slice(0, 80))
 check('strip shows RSS in M', /RSS:\s*16M/.test(text()))
 check('strip shows queue and inflight', /(队列|queue):\s*2/.test(text()) && /(运行中|running):\s*2/.test(text()), text().slice(0, 120))
@@ -211,20 +211,20 @@ check('strip values use fixed-width right-aligned slots', (() => {
   const before = widths()
   const saved = METRICS.history.fast[1]
   METRICS.history.fast[1] = { ...saved, cpuPctOneCore: 100, workingSetBytes: 1024 * 1048576, inflight: 12, queued: 64 }
-  await render(byId('dsh-native-strip').Component)
+  await render(byId('dsh-rust-exec-strip').Component)
   check('strip slot widths do not depend on values', widths() === before, widths() + ' vs ' + before)
   METRICS.history.fast[1] = saved
-  await render(byId('dsh-native-strip').Component)
+  await render(byId('dsh-rust-exec-strip').Component)
 }
 check('strip has no NaN/undefined leak', !/NaN|undefined/.test(text()))
 
 metricsDown = true
-await render(byId('dsh-native-strip').Component)
+await render(byId('dsh-rust-exec-strip').Component)
 check('strip keeps last sample on transient metrics failure', !/NaN|undefined/.test(text()))
 metricsDown = false
 
 console.log('\n=== strip opens the monitor in place ===')
-await render(byId('dsh-native-strip').Component)
+await render(byId('dsh-rust-exec-strip').Component)
 {
   const strip = rootEl.querySelector('[data-dsh-rust-strip="summary"]')
   check('strip is a keyboard-reachable button',
@@ -240,7 +240,7 @@ await render(byId('dsh-native-strip').Component)
 }
 
 console.log('\n=== settings tab toolbar + Grafana monitor dialog ===')
-await render(byId('dsh-native').Component)
+await render(byId('dsh-rust-exec').Component)
 await settle(200)
 console.log('  collapsed text:', text().slice(0, 160))
 const monitorButtons = buttons().filter((b) => /^(监控器|Monitor)$/.test((b.textContent || '').trim()))

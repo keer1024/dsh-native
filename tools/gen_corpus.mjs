@@ -1,4 +1,4 @@
-// Generates a disposable benchmark corpus for the dsh-native vs native-tools
+// Generates a disposable benchmark corpus for the dsh-rust-exec vs native-tools
 // comparison.  Layout (≈150 files, ~2400-line big file):
 //
 //   .bench-corpus/

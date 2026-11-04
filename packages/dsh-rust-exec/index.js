@@ -8,7 +8,7 @@
  * matches responses by request id, and kills the pool when the plugin is disposed.
  */
 /**
- * 模块职责（宿主侧 ESM bundle，dsh-native 插件）
+ * 模块职责（宿主侧 ESM bundle，dsh-rust-exec 插件）
  *
  * 把预编译的 `dsh-rust-worker` 子进程包装成 DSH 工具：WorkerPool 负责 worker
  * 进程生命周期、lane 池、每会话队列、空闲回收与 RSS/CPU 软限制；工具注册层做
@@ -344,7 +344,78 @@ const PLUGIN_VERSION = (() => {
  */
 function pluginStateDir(...parts) {
   const base = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
-  return join(base, 'dsh-native', ...parts)
+  return join(base, 'dsh-rust-exec', ...parts)
+}
+
+/**
+ * Feature switches the settings page can toggle. They are persisted to
+ * `<stateDir>/settings.json` so a restart keeps them, and the loader config
+ * always wins over the persisted file (explicit beats remembered).
+ */
+const FEATURE_KEYS = ['progressiveDisclosure', 'compactReads', 'prewarmIndex', 'deferStart', 'startDelayMs']
+/** Pool settings the panel can also change; they persist next to the switches. */
+const POOL_SETTING_KEYS = ['maxWorkers', 'maxShells', 'maxInFlightPerSession', 'idleReapMs', 'rssSoftLimitMb', 'cpuSoftLimitPct']
+/** Everything `settings.json` remembers; a loader value for the same key still wins. */
+const PERSISTED_KEYS = [...FEATURE_KEYS, ...POOL_SETTING_KEYS]
+
+/** Pick only the feature switches out of an arbitrary object; unknown keys are ignored. */
+function pickFeatureSettings(value) {
+  const out = {}
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return out
+  for (const key of FEATURE_KEYS) {
+    if (value[key] === undefined || value[key] === null) continue
+    out[key] = value[key]
+  }
+  return out
+}
+/** Switches that only take effect on the next mount: they shape registration or spawn. */
+const MOUNT_TIME_KEYS = ['progressiveDisclosure', 'prewarmIndex', 'deferStart', 'startDelayMs']
+/** File name of the persisted switch set. */
+const SETTINGS_FILE_NAME = 'settings.json'
+
+/** Pick only known persisted keys out of an arbitrary object; unknown keys are ignored. */
+function pickPersistedSettings(value) {
+  const out = {}
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return out
+  for (const key of PERSISTED_KEYS) {
+    if (value[key] === undefined || value[key] === null) continue
+    out[key] = value[key]
+  }
+  return out
+}
+
+/** Read the persisted setting set; a missing or malformed file is not an error. */
+function readPersistedSettings() {
+  try {
+    return pickPersistedSettings(JSON.parse(readFileSync(pluginStateDir(SETTINGS_FILE_NAME), 'utf8')))
+  } catch {
+    return {}
+  }
+}
+
+/** Write the setting set atomically (temp + rename) so a crash cannot truncate it. */
+function persistSettings(settings) {
+  const snapshot = {}
+  for (const key of PERSISTED_KEYS) snapshot[key] = settings[key]
+  try {
+    const target = pluginStateDir(SETTINGS_FILE_NAME)
+    mkdirSync(dirname(target), { recursive: true })
+    const temp = `${target}.${process.pid}.tmp`
+    writeFileSync(temp, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
+    renameSync(temp, target)
+  } catch {
+    // Persisting is best effort: a read-only profile still gets the live value.
+  }
+  return snapshot
+}
+
+/** Loader config wins; the persisted file only fills keys the loader left undefined. */
+function mergePersistedSettings(config, persisted) {
+  const merged = config && typeof config === 'object' ? { ...config } : {}
+  for (const key of PERSISTED_KEYS) {
+    if (merged[key] === undefined && persisted[key] !== undefined) merged[key] = persisted[key]
+  }
+  return merged
 }
 
 /** Rotate at 2 MB so a long-lived host cannot fill the disk with diagnostics. */
@@ -385,7 +456,7 @@ function logEvent(event, fields = {}) {
   } catch {
     // Best effort only.
   }
-  if (process.env.DSH_RUST_DEBUG) console.error(`[dsh-native] ${line}`)
+  if (process.env.DSH_RUST_DEBUG) console.error(`[dsh-rust-exec] ${line}`)
 }
 
 /** Remember a failure so `rust_health` can show it without opening a file. */
@@ -701,7 +772,7 @@ export class RustWorker {
     if (!ACCESS_DENIED.test(message)) return
     const workerPath = this.#launchPath ?? this.workerPath
     const relocated = this.#launchPath && this.#launchPath !== this.workerPath
-    error.message = `${message}\n\n[dsh-native] write denied for ${record.path ?? 'this path'}. `
+    error.message = `${message}\n\n[dsh-rust-exec] write denied for ${record.path ?? 'this path'}. `
       + `Worker image: ${workerPath} (source label: ${this.#integrity ?? 'unknown'}`
       + `${relocated ? ', running a relocated copy' : ''}). `
       + `Causes, in order: a deny ACE or read-only attribute on the path; a locked file; `
@@ -2910,6 +2981,9 @@ class MetricsStore {
       savings: this.savingsSnapshot(),
       readiness: this.readiness ?? null,
       config: {
+        // The panel renders every tunable from this block, so it must carry the full
+        // effective settings — not just the three pool keys it used to publish.
+        ...this.settings,
         lanes: this.pool.lanesPerWorker,
         maxQueueDepth: this.pool.options.maxQueueDepth,
         defaultTimeoutMs: this.settings.defaultTimeoutMs,
@@ -2991,14 +3065,7 @@ function readJsonBody(req, limit = 64 * 1024) {
 }
 
 /** Only these pool keys are accepted by POST /config; everything else is ignored. */
-const POOL_CONFIG_KEYS = [
-  'maxWorkers',
-  'maxShells',
-  'maxInFlightPerSession',
-  'idleReapMs',
-  'rssSoftLimitMb',
-  'cpuSoftLimitPct',
-]
+const POOL_CONFIG_KEYS = POOL_SETTING_KEYS
 
 /** Pick the runtime-tunable pool keys out of a JSON body; `pool.configure` validates them. */
 function pickPoolConfig(body) {
@@ -3255,14 +3322,36 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
           return
         }
         try {
-          const patch = pickPoolConfig(await readJsonBody(req))
-          const applied = pool.configure(patch)
+          const body = await readJsonBody(req)
+          const patch = pickPoolConfig(body)
+          const applied = Object.keys(patch).length > 0 ? pool.configure(patch) : {}
           // Keep the effective settings in sync so a later GET reports what is live.
           for (const key of POOL_CONFIG_KEYS) {
             if (applied[key] !== undefined) settings[key] = applied[key]
           }
-          log.info('config.update', applied)
-          send(res, 200, { applied, pool: pool.info() })
+          // Feature switches: `compactReads` is read per call, so it flips live; the
+          // rest shape registration or worker spawn and wait for the next mount.
+          const switches = pickFeatureSettings(body)
+          let changed = Object.keys(applied).length > 0
+          if (Object.keys(switches).length > 0) {
+            const normalized = normalizeConfig({ ...settings, ...switches })
+            for (const key of FEATURE_KEYS) {
+              if (switches[key] !== undefined) settings[key] = normalized[key]
+            }
+            changed = true
+          }
+          // Persist both halves so the next mount starts from what the panel shows;
+          // `persistSettings` keeps only the known keys, and a loader-pinned key still
+          // wins on the next mount (`mergePersistedSettings`).
+          if (changed) persistSettings(settings)
+          const requiresReload = Object.keys(switches).filter((key) => MOUNT_TIME_KEYS.includes(key))
+          log.info('config.update', { applied, switches, requiresReload })
+          send(res, 200, {
+            applied,
+            switches: pickFeatureSettings(settings),
+            requiresReload,
+            pool: pool.info(),
+          })
         } catch (error) {
           send(res, 400, { error: error?.message ?? String(error) })
         }
@@ -3348,7 +3437,7 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
  */
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
-  const settings = normalizeConfig(config)
+  const settings = normalizeConfig(mergePersistedSettings(config, readPersistedSettings()))
   const host = detectHost(ctx)
   const log = makeLog(ctx)
   // WorkerPool logs `(level, message)`; bridge it onto the plugin's event logger.

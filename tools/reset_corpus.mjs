@@ -1,5 +1,5 @@
 // reset_corpus.mjs — put the benchmark corpus back to RETRIES = 3 between reps.
-// Called with an absolute path so both stacks (native pwsh, dsh-native exec) run the
+// Called with an absolute path so both stacks (native pwsh, dsh-rust-exec exec) run the
 // exact same reset work; using it avoids fighting PowerShell's native-argument quoting.
 import { readFileSync, writeFileSync } from 'node:fs'
 

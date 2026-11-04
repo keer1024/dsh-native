@@ -107,7 +107,11 @@ const sample = {
   history: { fast: [{ cpuPctOneCore: 12.5, workingSetBytes: 15e6, privateBytes: 11e6, queued: 2, peakQueued: 4, inflight: 1, indexFiles: 438, indexSymbols: 1423, indexAgeMs: 5000, cpuMsTotal: 1000 }, { cpuPctOneCore: 20, workingSetBytes: 16e6, privateBytes: 12e6, queued: 0, peakQueued: 4, inflight: 0, indexFiles: 438, indexSymbols: 1423, indexAgeMs: 6000, cpuMsTotal: 1200 }] },
   last: { cpuPctOneCore: 20, workingSetBytes: 16e6, privateBytes: 12e6, queued: 0, peakQueued: 4, inflight: 0, indexFiles: 438, indexSymbols: 1423, indexAgeMs: 6000, cpuMsTotal: 1200 },
   pool: { schema: 'dsh-rust-exec/pool@1', workers: 1, lanesPerWorker: 4, queueDepth: 0, stats: { calls: 3, rejected: 0, spawned: 1 }, workersDetail: [{ id: 0, pid: 1234, running: true, inflight: 0, lanes: 4, retiring: false }], sessions: [] },
-  config: { maxWorkers: 1, maxInFlightPerSession: 4, idleReapMs: 300000, rssSoftLimitMb: 512, cpuSoftLimitPct: 70 },
+  config: {
+    maxWorkers: 1, maxInFlightPerSession: 4, idleReapMs: 300000, rssSoftLimitMb: 512, cpuSoftLimitPct: 70,
+    maxShells: 8, startDelayMs: 1200, progressiveDisclosure: true, compactReads: false,
+    prewarmIndex: true, deferStart: true, lanes: 4, maxQueueDepth: 64, defaultTimeoutMs: 120000,
+  },
 }
 mode = 'live'
 try {
@@ -129,18 +133,41 @@ try {
 await settle(1400)
 const liveText = text()
 console.log('\n[live]', liveText.slice(0, 340))
-check('renders title', /dsh-native worker/.test(liveText))
+check('renders title', /dsh-rust-exec worker/.test(liveText))
 check('renders cpu %', /\d+%/.test(liveText))
 check('renders rss MB', /MB/.test(liveText))
 check('renders index files', liveText.includes(String(livePayload.last.indexFiles)))
 check('no NaN/undefined leaks', !/NaN|undefined/.test(liveText))
+// README lists these switches; the panel must show all of them rather than the five
+// numeric fields it used to be limited to.
+const switches = [...document.querySelectorAll('#root [role=switch]')]
+const switchLabels = switches.map((s) => s.getAttribute('aria-label') || '')
+check('feature switches rendered', switches.length >= 4, switchLabels.join(','))
+check(
+  'switches cover the documented keys',
+  ['Progressive disclosure', 'Compact reads', 'Index prewarm', 'Deferred start']
+    .every((label) => switchLabels.some((actual) => actual.includes(label))),
+  switchLabels.join(','),
+)
+check('switches start in the documented default', switches.every((s) => s.getAttribute('aria-checked') === 'true' || s.getAttribute('aria-checked') === 'false'))
 
 // 4) apply a config change through the panel.
 // jsdom + React 18 does not deliver synthetic change events reliably in this harness, so the
-// input-edit leg is asserted structurally and the POST leg is driven through the real onClick prop.
+// input-edit leg is asserted structurally and both the toggle and the POST are driven through
+// the real React props.
 const { act } = require('@testing-library/react')
 const inputs = [...document.querySelectorAll('#root input[type=number]')]
 check('config inputs editable', inputs.length >= 4 && inputs.every((i) => !i.disabled && !i.readOnly))
+// Flip one switch first, so the POST body must carry both the pool keys and the switches.
+const compactToggle = switches.find((s) => (s.getAttribute('aria-label') || '').includes('Compact reads'))
+const compactKey = compactToggle && Object.keys(compactToggle).find((k) => k.startsWith('__reactProps'))
+check('compact read switch is bound', Boolean(compactKey && compactToggle[compactKey]?.onClick))
+if (compactKey) {
+  await act(async () => {
+    await compactToggle[compactKey].onClick()
+    await new Promise((r) => setTimeout(r, 50))
+  })
+}
 const button = [...document.querySelectorAll('#root button')].find((b) => /Apply/.test(b.textContent))
 console.log('\n[apply] inputs=' + inputs.length + ' label=' + button?.textContent)
 check('apply button present', Boolean(button))
@@ -152,7 +179,11 @@ if (button) {
       await button[propsKey].onClick()
       await new Promise((r) => setTimeout(r, 150))
     })
-    check('POST /config sent', posts.some((p) => p.init?.method === 'POST'), posts.filter((p) => p.init?.method === 'POST').map((p) => p.url).join(','))
+    const configPosts = posts.filter((p) => p.init?.method === 'POST')
+    check('POST /config sent', configPosts.length > 0, configPosts.map((p) => p.url).join(','))
+    const body = configPosts.length ? JSON.parse(configPosts[configPosts.length - 1].init.body) : {}
+    check('POST carries pool keys', body.maxWorkers !== undefined && body.cpuSoftLimitPct !== undefined, JSON.stringify(body).slice(0, 140))
+    check('POST carries the toggled switch', body.compactReads === true, JSON.stringify(body).slice(0, 140))
     check('apply feedback shown', /applied/.test(text()), text().slice(-140))
   }
 }

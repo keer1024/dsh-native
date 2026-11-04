@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "dsh-native",
-    "description": "dsh-native：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 8 条 HTTP 路由，对外 11 个工具（10 个 rust_* 加 native_help）。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器和 dsh-native 资源状态条。"
+    "title": "dsh-rust-exec",
+    "description": "dsh-rust-exec：常驻 Rust worker 承担命令执行、sha256 校验的文件读写、代码索引与检索、会话日志投影与资源采样；宿主只做 JSON-RPC 管道、lane 调度与 8 条 HTTP 路由，对外 11 个工具（10 个 rust_* 加 native_help）。界面提供固定头部的会话投影视图（模糊筛选、固定 420px 详情）、Grafana 风格监控器和 dsh-rust-exec 资源状态条。"
   }
 }

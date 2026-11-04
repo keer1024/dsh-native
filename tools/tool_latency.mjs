@@ -1,5 +1,5 @@
 // tool_latency.mjs — per-tool wall time from the DSH session log (the same append-only
-// session.v4.jsonl.zstd the dsh-native projection reads).
+// session.v4.jsonl.zstd the dsh-rust-exec projection reads).
 //
 // Every persisted `tool/call` carries a timestamp; the matching `tool/result` carries the
 // completion timestamp. The delta is the true end-to-end cost the harness paid, with no

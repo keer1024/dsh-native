@@ -8,7 +8,7 @@
 // starts the copy instead of the labelled original.
 //
 // usage: node tools/verify_low_il_fix.mjs [path-to-exe]
-// Writes only under .tmp/ plus %LOCALAPPDATA%\dsh-native\bin.
+// Writes only under .tmp/ plus %LOCALAPPDATA%\dsh-rust-exec\bin.
 import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -82,8 +82,8 @@ function integrity(path) {
 /** Same naming rule as `relocateWorker` in packages/dsh-rust-exec/index.js. */
 function relocate(path) {
   const info = statSync(path);
-  const target = join(process.env.LOCALAPPDATA, 'dsh-native', 'bin', `${basename(path, '.exe')}-${info.size}-${Math.round(info.mtimeMs)}.exe`);
-  mkdirSync(join(process.env.LOCALAPPDATA, 'dsh-native', 'bin'), { recursive: true });
+  const target = join(process.env.LOCALAPPDATA, 'dsh-rust-exec', 'bin', `${basename(path, '.exe')}-${info.size}-${Math.round(info.mtimeMs)}.exe`);
+  mkdirSync(join(process.env.LOCALAPPDATA, 'dsh-rust-exec', 'bin'), { recursive: true });
   copyFileSync(path, `${target}.partial`);
   renameSync(`${target}.partial`, target);
   return target;

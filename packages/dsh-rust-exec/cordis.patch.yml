@@ -1,4 +1,4 @@
 - insert:
-    - id: 'dsh-native'
-      name: 'dsh-native'
+    - id: 'dsh-rust-exec'
+      name: 'dsh-rust-exec'
       config: {}

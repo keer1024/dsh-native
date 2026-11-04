@@ -42,7 +42,7 @@ try {
     // A path the user owns but cannot write: the failure must be logged and must
     // grow the actionable hint instead of a bare `os error 5`.
     const denied = process.env.PROBE_DENIED_PATH
-      ?? join('C:\\Windows\\System32\\drivers\\etc', 'dsh-native-probe.txt');
+      ?? join('C:\\Windows\\System32\\drivers\\etc', 'dsh-rust-exec-probe.txt');
     try {
       await worker.call('fs.write', { path: denied, content: 'nope\n' }, 20_000);
       report.denied = { denied: false };

@@ -1,4 +1,4 @@
-# dsh-native
+# dsh-rust-exec
 
 **A resident Rust sidecar for DeepSeek Harness (DSH).** Command execution, sha256-guarded file IO,
 code indexing and search, session-log projection and resource sampling run in a long-lived Rust
@@ -11,11 +11,11 @@ only adds display.
 
 ```bash
 # 1) install into a DSH profile — public npmjs, unscoped since 1.7.0
-dsh plugin --profile desktop add dsh-native
-#    same thing: pnpm add dsh-native inside <DSH_HOME>/profiles/<profile>
+dsh plugin --profile desktop add dsh-rust-exec
+#    same thing: pnpm add dsh-rust-exec inside <DSH_HOME>/profiles/<profile>
 
 # 2) mount the bundle — the package ships cordis.patch.yml
-#    add "dsh-native" to dsh.profile.bundles in
+#    add "dsh-rust-exec" to dsh.profile.bundles in
 #    <DSH_HOME>/profiles/<profile>/package.json
 ```
 
@@ -33,7 +33,7 @@ A healthy answer contains `ok: true`, the worker pid and the mounted route count
 |---|---|
 | Tools | resident: `rust_exec`, `rust_read`, `rust_search`, `rust_health`, `native_help`; activated on demand: `rust_write`, `rust_edit`, `rust_stat`, `rust_ls`, `rust_symbols`, `rust_session_open` |
 | Routes | `/api/dsh-rust-exec/{metrics,health,events,sessions,session,session/body,config,cache}` |
-| UI | pinned-header session projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor with one card row each for workers, sessions and cache, `dsh-native` resource strip |
+| UI | pinned-header session projection view (fuzzy filter, fixed 420 px detail), Grafana-style monitor with one card row each for workers, sessions and cache, `dsh-rust-exec` resource strip |
 | Worker | warm PowerShell lanes (default 4, max 16), session affinity, soft RSS/CPU limits, watchdog against host exit, disk-persisted code index (parallel parse) |
 
 ## Requirements

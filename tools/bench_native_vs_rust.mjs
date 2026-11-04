@@ -1,11 +1,11 @@
 // Protocol-level comparison: "what DSH's native tools cost today" vs "what the
-// dsh-native worker costs", measured side by side on the same corpus and the
+// dsh-rust-exec worker costs", measured side by side on the same corpus and the
 // same operations.
 //
 //   native side  = one OS process spawn per call, the way the built-in tools
 //                  work (powershell.exe for `pwsh`, rg.exe for `grep`, Node fs
 //                  for the in-process read/write/edit/stat/list tools).
-//   dsh-native   = one JSON-RPC round-trip to an already-booted worker.
+//   dsh-rust-exec   = one JSON-RPC round-trip to an already-booted worker.
 //
 // usage: node tools/bench_native_vs_rust.mjs [--runs 15] [--corpus DIR] [--out FILE]
 //

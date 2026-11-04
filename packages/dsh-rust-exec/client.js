@@ -1,9 +1,9 @@
-// dsh-native 插件客户端：浏览器侧的 React 叠加物，不持有任何会话真相。
+// dsh-rust-exec 插件客户端：浏览器侧的 React 叠加物，不持有任何会话真相。
 //
 // 职责（通过 ctx.slots 挂三个 slot，彼此独立注册）：
 //   1. settings.plugins.tab       -> RustExecPanel：配置、运行状态与「监控器」入口；
 //   2. conversation.view          -> RustConversationView（会话投影只读浏览器）；
-//   3. conversation.composer.dock -> MetricsStrip：输入框下方一行 dsh-native 资源摘要。
+//   3. conversation.composer.dock -> MetricsStrip：输入框下方一行 dsh-rust-exec 资源摘要。
 // 数据面：probeJson / useMetrics 轮询插件自己的 /metrics、/health、/sessions、/cache，
 // 由 readiness.phase 状态机决定何时显示占位符、何时立即补齐数据。
 //
@@ -13,14 +13,14 @@
 //   - 没有数据时一律显示 `—`（见 DASH），不显示 undefined/NaN，也不假装有值；
 //   - 状态点不能只靠颜色表意，必须带 aria-label/title（见 Dot 组件）。
 //
-// Registration id must equal package.json "name" (dsh-native). The host keys its
+// Registration id must equal package.json "name" (dsh-rust-exec). The host keys its
 // client-graph rows by package name and re-serves a bundle whose registration id
 // does not match the row id; that second execution throws "duplicate factory
-// registration" and fails the whole web boot (crash log: "dsh-native: import
+// registration" and fails the whole web boot (crash log: "dsh-rust-exec: import
 // failed"). Keep this in sync with package.json — tools/check_client_identity.mjs
 // enforces it.
 window.__ModuleLoader__.load({
-  id: 'dsh-native',
+  id: 'dsh-rust-exec',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -34,7 +34,7 @@ window.__ModuleLoader__.load({
     // 设置页两种语言的静态文案；语言由 pick() 在渲染时决定，这里只做数据表。
     const DICT = {
       en: {
-        title: 'dsh-native worker',
+        title: 'dsh-rust-exec worker',
         subtitle: 'Warm PowerShell lanes, persistent code index, resource governance',
         refresh: 'Refresh',
         running: 'running',
@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
         noSession: 'No session activity yet',
       },
       zh: {
-        title: 'dsh-native',
+        title: 'dsh-rust-exec',
         subtitle: '常驻 PowerShell lane、常驻代码索引、资源治理',
         refresh: '刷新',
         running: '运行中',
@@ -201,6 +201,34 @@ window.__ModuleLoader__.load({
             border: '1px solid color-mix(in srgb, currentColor 22%, transparent)', borderRadius: 6,
           },
         }),
+      )
+    }
+
+    // 受控开关：button[role=switch]，避免自绘 checkbox 的焦点/可见性问题。
+    function Toggle({ label, hint, value, onChange }) {
+      return h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 210, flex: '1 1 210px' } },
+        h('button', {
+          type: 'button',
+          role: 'switch',
+          'aria-checked': value ? 'true' : 'false',
+          'aria-label': label,
+          onClick: () => onChange(!value),
+          style: {
+            width: 34, height: 18, borderRadius: 99, padding: 0, cursor: 'pointer', flex: '0 0 auto', marginTop: 1,
+            border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
+            background: value ? COLORS.accent : 'color-mix(in srgb, currentColor 10%, transparent)',
+            position: 'relative',
+          },
+        }, h('span', {
+          style: {
+            position: 'absolute', top: 1, left: value ? 17 : 1, width: 14, height: 14, borderRadius: '50%',
+            background: '#fff', transition: 'left 120ms ease',
+          },
+        })),
+        h('span', { style: { display: 'flex', flexDirection: 'column', gap: 1 } },
+          h('span', { style: { fontSize: 11.5 } }, label),
+          hint ? h('span', { style: { fontSize: 10, opacity: 0.55 } }, hint) : null,
+        ),
       )
     }
 
@@ -341,12 +369,19 @@ window.__ModuleLoader__.load({
       const last = fast.length ? fast[fast.length - 1] : null
 
       // 没有编辑意图时直接映射后端 config；一旦编辑就用 draft，防止每秒轮询把输入冲掉。
+      // 开关一起映射：面板要能显示 README 里写过的每一个可调项，而不只是五个数字项。
       const effective = draft ?? (config ? {
         maxWorkers: config.maxWorkers,
         maxInFlightPerSession: config.maxInFlightPerSession,
         idleReapMs: config.idleReapMs,
         rssSoftLimitMb: config.rssSoftLimitMb,
         cpuSoftLimitPct: config.cpuSoftLimitPct,
+        maxShells: config.maxShells,
+        startDelayMs: config.startDelayMs,
+        progressiveDisclosure: config.progressiveDisclosure !== false,
+        compactReads: config.compactReads === true,
+        prewarmIndex: config.prewarmIndex !== false,
+        deferStart: config.deferStart !== false,
       } : null)
 
       // 提交整份限额；成功后清空 draft，让表单重新跟随服务端回执。
@@ -361,7 +396,10 @@ window.__ModuleLoader__.load({
           })
           const body = await res.json().catch(() => ({}))
           if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status)
-          setApplyState({ status: 'applied', message: JSON.stringify(body.applied ?? {}) })
+          const reload = Array.isArray(body.requiresReload) && body.requiresReload.length
+            ? ' · reload for ' + body.requiresReload.join(', ')
+            : ''
+          setApplyState({ status: 'applied', message: JSON.stringify(body.applied ?? {}) + reload })
           setDraft(null)
         } catch (err) {
           setApplyState({ status: 'failed', message: err.message || String(err) })
@@ -389,7 +427,7 @@ window.__ModuleLoader__.load({
 
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
             h('span', { style: { width: 8, height: 8, borderRadius: 99, background: statusColor, display: 'inline-block' } }),
-            h('strong', { style: { fontSize: 14 } }, 'dsh-native worker'),
+            h('strong', { style: { fontSize: 14 } }, 'dsh-rust-exec worker'),
             h('span', { style: { fontSize: 11.5, opacity: 0.66 } }, statusText),
           ),
           h('span', { style: { fontSize: 11.5, opacity: 0.6, fontVariantNumeric: 'tabular-nums' } },
@@ -450,6 +488,40 @@ window.__ModuleLoader__.load({
           ),
           applyState.status !== 'idle' ? h('div', { style: { fontSize: 11, opacity: applyState.status === 'failed' ? 1 : 0.66, color: applyState.status === 'failed' ? COLORS.bad : undefined } },
             applyState.status === 'failed' ? 'failed: ' + applyState.message : 'applied ' + applyState.message) : null,
+        ) : null,
+
+        effective ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)', paddingTop: 12 } },
+          h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, 'Feature switches'),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start' } },
+            h(Toggle, {
+              label: 'Progressive disclosure',
+              hint: '5 resident tools, the rest on demand · reload to change',
+              value: effective.progressiveDisclosure,
+              onChange: (v) => setDraft({ ...effective, progressiveDisclosure: v }),
+            }),
+            h(Toggle, {
+              label: 'Compact reads',
+              hint: 'strip comments and indent in rust_read, line numbers kept · live',
+              value: effective.compactReads,
+              onChange: (v) => setDraft({ ...effective, compactReads: v }),
+            }),
+            h(Toggle, {
+              label: 'Index prewarm',
+              hint: 'build the index after the worker is ready · reload to change',
+              value: effective.prewarmIndex,
+              onChange: (v) => setDraft({ ...effective, prewarmIndex: v }),
+            }),
+            h(Toggle, {
+              label: 'Deferred start',
+              hint: 'let DSH paint first, then spawn the worker · reload to change',
+              value: effective.deferStart,
+              onChange: (v) => setDraft({ ...effective, deferStart: v }),
+            }),
+            h(NumberField, { label: 'Start delay (ms)', value: effective.startDelayMs, min: 0, max: 30000, step: 100, onChange: (v) => setDraft({ ...effective, startDelayMs: v }) }),
+            h(NumberField, { label: 'Shells per worker', value: effective.maxShells, min: 1, max: 16, step: 1, onChange: (v) => setDraft({ ...effective, maxShells: v }) }),
+          ),
+          h('div', { style: { fontSize: 10.5, opacity: 0.55 } },
+            'Switches persist to settings.json; an explicit loader config still wins.'),
         ) : null,
 
         h(SessionProjectionCard),
@@ -1043,7 +1115,7 @@ window.__ModuleLoader__.load({
           style: { flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 8, borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' },
         },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
-            h('strong', null, 'dsh-native'),
+            h('strong', null, 'dsh-rust-exec'),
             h('span', { style: { opacity: 0.6 } }, (counts.messages != null ? counts.messages : rows.length) + ' ' + pick('条消息', 'messages')),
             counts.toolCalls != null ? h('span', { style: { opacity: 0.6 } }, counts.toolCalls + ' ' + pick('次工具调用', 'tool calls')) : null,
             needle || kindFilter !== 'all' || toolFilter
@@ -1923,7 +1995,7 @@ window.__ModuleLoader__.load({
       },
         h('div', {
           role: 'dialog',
-          'aria-label': pick('dsh-native 性能监控', 'dsh-native performance monitor'),
+          'aria-label': pick('dsh-rust-exec 性能监控', 'dsh-rust-exec performance monitor'),
           style: {
             width: 'min(1100px, 96vw)', maxHeight: '75vh', overflow: 'auto',
             background: MONITOR_COLORS.bg, color: MONITOR_COLORS.text,
@@ -1941,7 +2013,7 @@ window.__ModuleLoader__.load({
                   : phase === 'failed' ? MONITOR_COLORS.red : MONITOR_COLORS.orange,
               },
             }),
-            h('strong', { style: { fontSize: 15 } }, pick('dsh-native · 性能监控', 'dsh-native · performance')),
+            h('strong', { style: { fontSize: 15 } }, pick('dsh-rust-exec · 性能监控', 'dsh-rust-exec · performance')),
             h('span', { style: { fontSize: 11, color: MONITOR_COLORS.muted } },
               phase === 'ready'
                 ? pick('进程生命周期', 'process lifecycle') + ' · ' + pick('最近 2 分钟曲线', 'last 2 minutes')
@@ -2019,9 +2091,9 @@ window.__ModuleLoader__.load({
       const strip = h('div', {
         role: 'button',
         tabIndex: 0,
-        'aria-label': pick('打开 dsh-native 监控面板', 'open the dsh-native monitor'),
+        'aria-label': pick('打开 dsh-rust-exec 监控面板', 'open the dsh-rust-exec monitor'),
         'data-dsh-rust-strip': 'summary',
-        title: pick('dsh-native · 实时资源 · 点击查看监控', 'dsh-native · live resources · click for the monitor'),
+        title: pick('dsh-rust-exec · 实时资源 · 点击查看监控', 'dsh-rust-exec · live resources · click for the monitor'),
         onClick: () => setOpen(true),
         onKeyDown: (event) => {
           // 键盘等价物：Enter 与 Space 都要打开，Space 记得阻止页面滚动。
@@ -2046,7 +2118,7 @@ window.__ModuleLoader__.load({
       },
         // 小圆点只是粗略提示：单核 CPU 超过 50% 转警告色，其余为正常色。
         h('span', { style: { width: 6, height: 6, borderRadius: 99, background: (last.cpuPctOneCore || 0) > 50 ? COLORS.warn : COLORS.ok, display: 'inline-block' } }),
-        h('span', { style: { marginRight: 2 } }, 'dsh-native'),
+        h('span', { style: { marginRight: 2 } }, 'dsh-rust-exec'),
         ...nodes,
       )
       if (!open) return strip
@@ -2062,12 +2134,9 @@ window.__ModuleLoader__.load({
         try {
           ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
             name: 'settings.plugins.tab',
-            id: 'dsh-native',
+            id: 'dsh-rust-exec',
             order: 20,
-            label: () => {
-              const lang = String((typeof navigator !== 'undefined' && navigator.language) || 'en')
-              return lang.toLowerCase().startsWith('zh') ? 'dsh-native' : 'dsh-native'
-            },
+            label: () => 'dsh-rust-exec',
           }, RustExecPanel))
         } catch {
           // Slot contract changed or slot missing: the panel simply does not appear.
@@ -2077,9 +2146,9 @@ window.__ModuleLoader__.load({
         try {
           ctx.slots.inject('conversation.view', () => ctx.slots.register({
             name: 'conversation.view',
-            id: 'dsh-native-view',
+            id: 'dsh-rust-exec-view',
             order: 20,
-            label: () => 'dsh-native',
+            label: () => 'dsh-rust-exec',
           }, RustConversationView))
         } catch {
           // View slot unavailable: conversation rendering is untouched.
@@ -2088,7 +2157,7 @@ window.__ModuleLoader__.load({
         try {
           ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
             name: 'conversation.composer.dock',
-            id: 'dsh-native-strip',
+            id: 'dsh-rust-exec-strip',
             order: 40,
           }, MetricsStrip))
         } catch {

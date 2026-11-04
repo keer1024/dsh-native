@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Client identity guard for the dsh-native bundle.
+// Client identity guard for the dsh-rust-exec bundle.
 //
 // Why this exists: the host keys client-graph rows by package.json "name" but the
 // browser registers factories by the bundle's `load({ id })`. When the package was
-// renamed dsh-rust-exec -> dsh-native the id stayed stale, so the host re-served the
+// renamed dsh-rust-exec -> dsh-rust-exec the id stayed stale, so the host re-served the
 // bundle, the second execution threw `client-modules: duplicate factory registration
 // for "dsh-rust-exec"`, and web boot failed with `1 entry did not activate`
 // (crash-2026-10-21T05-54-22-705Z-web-boot.log). This check fails fast on that

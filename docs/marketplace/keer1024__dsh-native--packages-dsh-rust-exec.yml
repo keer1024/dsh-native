@@ -1,7 +1,7 @@
 # awesome-dsh-plugin 条目（待提交）
 #
 # 用法：把本文件复制到 awesome-dsh-plugin 仓库的
-#   data/plugins/keer1024__dsh-native--packages-dsh-rust-exec.yml
+#   data/plugins/keer1024__dsh-rust-exec--packages-dsh-rust-exec.yml
 # 然后开 PR（标题如 "Add keer1024/dsh-native"），不要手改任何 README。
 #
 # 提交前还差三步（都在 GitHub / npm 一侧，见 PUBLISHING.md §2）：

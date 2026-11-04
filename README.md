@@ -1,13 +1,13 @@
 <p align="center">
-  <img src="packages/dsh-rust-exec/icon.svg" width="112" height="112" alt="dsh-native">
+  <img src="packages/dsh-rust-exec/icon.svg" width="112" height="112" alt="dsh-rust-exec">
 </p>
 
-<h1 align="center"><img src="image/wordmark.svg" width="300" height="76" alt="dsh-native"></h1>
+<h1 align="center"><img src="image/wordmark.svg" width="300" height="76" alt="dsh-rust-exec"></h1>
 
 <p align="center"><code>a resident Rust sidecar for DeepSeek Harness</code></p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.5-2f6fed?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.6-2f6fed?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
@@ -20,7 +20,7 @@
 
 - **11 个工具**：10 个 `rust_*` 加 `native_help`（5 个常驻、6 个按需激活）
 - **8 条 HTTP 路由**：`/api/dsh-rust-exec/*`
-- **三处界面**：固定头部的会话投影视图、Grafana 风格监控器、输入框下沿的 `dsh-native` 资源状态条
+- **三处界面**：固定头部的会话投影视图、Grafana 风格监控器、输入框下沿的 `dsh-rust-exec` 资源状态条
 
 为什么值得装：
 
@@ -29,19 +29,19 @@
 3. **看不见运行状态。** worker 重启次数、队列堵没堵、RSS 涨到哪、哪个会话在跑，全部进 `/metrics`、`rust_health` 和监控器。
 
 <p align="center">
-  <img src="image/desc.png" alt="设置页里的 dsh-native 条目与资源监控入口" width="880">
+  <img src="image/desc.png" alt="设置页里的 dsh-rust-exec 条目与资源监控入口" width="880">
   <br>
   <sub><b>① 介绍</b> — 设置页里的插件条目、版本与资源监控入口</sub>
 </p>
 
 <p align="center">
-  <img src="image/worker.png" alt="dsh-native 会话投影视图" width="880">
+  <img src="image/worker.png" alt="dsh-rust-exec 会话投影视图" width="880">
   <br>
   <sub><b>② 视图页</b> — 固定头部（计数、模糊筛选、类别下拉、监控器/刷新）+ 左侧消息列表 + 固定 420 px 详情</sub>
 </p>
 
 <p align="center">
-  <img src="image/monitor.png" alt="dsh-native 监控器" width="880">
+  <img src="image/monitor.png" alt="dsh-rust-exec 监控器" width="880">
   <br>
   <sub><b>③ 监控页</b> — 三行卡片（Workers / Sessions / Cache）+ 跟随选中 worker 的曲线组 + 节省报表</sub>
 </p>
@@ -54,19 +54,19 @@
 
 ```powershell
 # 1) 装进 DSH profile
-pnpm add dsh-native     # 或 npm i dsh-native
+pnpm add dsh-rust-exec     # 或 npm i dsh-rust-exec
 
 # 2) 挂载 bundle —— 编辑 <DSH_HOME>\profiles\<profile>\package.json
 #    "dsh": { "profile": { "bundles": [
-#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-native" ] } }
+#        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-rust-exec" ] } }
 
 # 3) 重启 DSH，然后验收
 curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 ```
 
-`ok: true`、worker pid、`routes: 8` 都在，就算装好了。随后设置页 → 插件 → `dsh-native` 会出现「监控器」按钮，对话页顶部会多出 `dsh-native` 页签。
+`ok: true`、worker pid、`routes: 8` 都在，就算装好了。随后设置页 → 插件 → `dsh-rust-exec` 会出现「监控器」按钮，对话页顶部会多出 `dsh-rust-exec` 页签。
 
-> 1.7.0 起包名是无 scope 的 **`dsh-native`**。从 `@keer1024/dsh-native` 升级时，`dependencies` 的键与 `dsh.profile.bundles` 里的旧名要一起改，再 `pnpm install` + 重启；细节见 [PACKAGE_RENAME_1.7.0.md](docs/rust-exec-plugin/PACKAGE_RENAME_1.7.0.md)。
+> 1.7.6 起包名是 **`dsh-rust-exec`**（1.7.0–1.7.5 叫 `dsh-native`，更早是 `@keer1024/dsh-native`）。升级时 `dependencies` 的键与 `dsh.profile.bundles` 里的旧名要一起改，再 `pnpm install` + 重启；细节见 [包名迁移](docs/rust-exec-plugin/PACKAGE_RENAME_1.7.0.md) 与 [1.7.6 任务单](docs/tasks/1.7.6.md)。
 
 ### 从 tarball（离线 / 内网）
 
@@ -74,10 +74,10 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\dsh-native-1.7.5.tgz -Algorithm SHA256
-# 与 bin\dsh-native-1.7.5.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\dsh-rust-exec-1.7.6.tgz -Algorithm SHA256
+# 与 bin\dsh-rust-exec-1.7.6.tgz.sha256 里的摘要比对
 
-npm i .\bin\dsh-native-1.7.5.tgz
+npm i .\bin\dsh-rust-exec-1.7.6.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见 [分发与跨机安装](docs/rust-exec-plugin/DISTRIBUTION.md)。
@@ -92,7 +92,7 @@ dsh plugin --profile web add github:keer1024/dsh-native#path:/packages/dsh-rust-
 
 ### 升级与卸载
 
-- **升级**：`pnpm add dsh-native@latest` → 重启 DSH。
+- **升级**：`pnpm add dsh-rust-exec@latest` → 重启 DSH。
 - **卸载**：在 DSH 插件管理里移除，或从 `dsh.profile.bundles` 删掉该条目 → 重启 DSH；投影缓存可整体删除，不残留状态。
 
 装好后 host 侧（工具、路由）热生效；客户端叠加物需要**刷新一次页面**。
@@ -132,45 +132,45 @@ dsh plugin --profile web add github:keer1024/dsh-native#path:/packages/dsh-rust-
 | `GET /sessions` | 可投影的会话列表（≤50，按 mtime 倒序） |
 | `GET /session?id=&limit=&cursor=` | 单个会话的分页投影（`mode=append/warm/head`、耗时分解） |
 | `GET /session/body?id=&seqs=&maxChars=` | 指定 seq 的消息正文（最多 40 个 seq，缺 `seqs` → 400） |
-| `POST /config` | 热改配置：`workers`、每会话并发、空闲回收、RSS/CPU 软限等 |
+| `POST /config` | 热改配置：6 个池键（`maxWorkers`/`maxShells`/`maxInFlightPerSession`/`idleReapMs`/`rssSoftLimitMb`/`cpuSoftLimitPct`）+ 5 个功能开关（`progressiveDisclosure`/`compactReads`/`prewarmIndex`/`deferStart`/`startDelayMs`）；返回 `applied`/`switches`/`requiresReload` |
 
 浏览器带会话凭据，Node 侧直接 `fetch` 会拿到 401。
 
 ## 配置
 
-Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直接拒绝挂载；`POST /config` 可热改一部分。
+Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直接拒绝挂载；`POST /config` 可热改一部分。设置页覆盖下表标 ✔ 的 11 个键：点 Apply 后立即写进 `%LOCALAPPDATA%\dsh-rust-exec\settings.json`（原子写，temp + rename），重启时自动读回；loader 里显式写了同一个键时以 loader 为准，所以想在机器上锁死某项，就写在 loader 行而不是设置页。
 
-| 键 | 范围 / 默认 | 说明 |
-|---|---|---|
-| `workerPath` | 默认包内 `bin/dsh-rust-worker.exe` | 跨机部署路径不同时必须显式配 |
-| `defaultTimeoutMs` | >0，默认 60000 | 单次调用默认超时 |
-| `lanes` | 1–16，默认 `min(4, cores/2)` | 每个 worker 的并行 shell 数 |
-| `maxQueueDepth` | 1–4096，默认 64 | 队列闸门；满了返回可重试的拒绝 |
-| `metricsIntervalMs` | ≥250，默认 1000 | 采样周期 |
-| `maxWorkers` | 1–8，默认 1 | 多进程是隔离手段，不是吞吐手段 |
-| `maxShells` | 1–64，默认 8 | worker 侧 shell 硬上限 |
-| `maxInFlightPerSession` | 1–64，默认 = `lanes` | 同会话并发闸门 |
-| `idleReapMs` | ≥10000，默认 300000 | 空闲回收 |
-| `rssSoftLimitMb` | 64–65536，默认 512 | 软限：超限先丢索引，不杀进程 |
-| `cpuSoftLimitPct` | 10–100，默认 70 | 持续超限时暂停派发 |
-| `deferStart` | 布尔，默认 `true` | 异步启动：挂载后等 `startDelayMs` 再拉起 worker |
-| `startDelayMs` | 0–30000，默认 1200 | 延迟启动时长；工具先被调用会立刻结束等待 |
-| `prewarmIndex` | 布尔，默认 `true` | worker 启动时预热索引与 lane |
-| `progressiveDisclosure` | 布尔，默认 `true` | 5 常驻 + 6 按需；`false` 恢复 11 个全常驻 |
-| `compactReads` | 布尔，默认 `false` | `rust_read` 默认压缩（去注释、折叠缩进，行号仍有效） |
+| 键 | 范围 / 默认 | 设置页 | 生效 | 说明 |
+|---|---|---|---|---|
+| `workerPath` | 默认包内 `bin/dsh-rust-worker.exe` | — | 重启 | 跨机部署路径不同时必须显式配 |
+| `defaultTimeoutMs` | >0，默认 60000 | — | 重启 | 单次调用默认超时 |
+| `lanes` | 1–16，默认 `min(4, cores/2)` | — | 重启 | 每个 worker 的并行 shell 数 |
+| `maxQueueDepth` | 1–4096，默认 64 | — | 重启 | 队列闸门；满了返回可重试的拒绝 |
+| `metricsIntervalMs` | ≥250，默认 1000 | — | 重启 | 采样周期 |
+| `maxWorkers` | 1–8，默认 1 | ✔ | 立即 | 多进程是隔离手段，不是吞吐手段 |
+| `maxShells` | 1–64，默认 8 | ✔ | 立即 | worker 侧 shell 硬上限 |
+| `maxInFlightPerSession` | 1–64，默认 = `lanes` | ✔ | 立即 | 同会话并发闸门 |
+| `idleReapMs` | ≥10000，默认 300000 | ✔ | 立即 | 空闲回收 |
+| `rssSoftLimitMb` | 64–65536，默认 512 | ✔ | 立即 | 软限：超限先丢索引，不杀进程 |
+| `cpuSoftLimitPct` | 10–100，默认 70 | ✔ | 立即 | 持续超限时暂停派发 |
+| `deferStart` | 布尔，默认 `true` | ✔ | 重启 | 异步启动：挂载后等 `startDelayMs` 再拉起 worker |
+| `startDelayMs` | 0–30000，默认 1200 | ✔ | 重启 | 延迟启动时长；工具先被调用会立刻结束等待 |
+| `prewarmIndex` | 布尔，默认 `true` | ✔ | 重启 | worker 启动时预热索引与 lane |
+| `progressiveDisclosure` | 布尔，默认 `true` | ✔ | 重启 | 5 常驻 + 6 按需；`false` 恢复 11 个全常驻 |
+| `compactReads` | 布尔，默认 `false` | ✔ | 立即 | `rust_read` 默认压缩（去注释、折叠缩进，行号仍有效） |
 
 环境变量：`DSH_HOME`、`DSH_PROFILE`、`DSH_RUST_WORKER_CWD`、`DSH_RUST_DEBUG`、`DSH_RUST_PREWARM`、`DSH_VERSION`。
 锁文件 `<DSH_HOME>/run/dsh-rust-worker-<profile>.lock` 由宿主写，回收前核对进程镜像名，不按 pid 盲杀。
-诊断日志：`%LOCALAPPDATA%\dsh-native\logs\rust-exec-<宿主 pid>.log`（JSONL，2 MB 轮转）。
+诊断日志：`%LOCALAPPDATA%\dsh-rust-exec\logs\rust-exec-<宿主 pid>.log`（JSONL，2 MB 轮转）。
 
 ## 排障
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | 重启后报 `web boot: 1 entry did not activate` / `duplicate factory registration` | `package.json` 的 `name`、`client.js` 注册 id、`cordis.patch.yml` 不一致 | `node tools\check_client_identity.mjs` 定位；三处必须同名 |
-| 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `dsh-native` | 补 bundles + `pnpm install` + 重启 |
+| 工具列表里没有 `rust_*` | profile 的 `dsh.profile.bundles` 缺 `dsh-rust-exec` | 补 bundles + `pnpm install` + 重启 |
 | 面板 401 / 404 | 浏览器没带凭据，或路由没挂上 | 看 `/health` 的 `routes.registered` |
-| 写 `%TEMP%` / `~/.dsh` 报 `拒绝访问 (os error 5)` | worker 以低完整性运行 | 1.6.1 起镜像已搬到 `%LOCALAPPDATA%\dsh-native\bin` 再启动；仍失败看 `rust_health.logPath` |
+| 写 `%TEMP%` / `~/.dsh` 报 `拒绝访问 (os error 5)` | worker 以低完整性运行 | 1.6.1 起镜像已搬到 `%LOCALAPPDATA%\dsh-rust-exec\bin` 再启动；仍失败看 `rust_health.logPath` |
 | 首次 `exec` 3–20 s | 该 lane 的 PowerShell 冷启动 | 正常；后续同 lane 毫秒级 |
 | 监控器一直显示「启动中…」 | `readiness.phase` 停在 `pending/starting`，或 worker 拉起失败 | 看 `/health` 的 `phase` 与 `readiness.error` |
 | 强杀 worker 后残留 `powershell.exe` | Windows 不杀进程树 | `kill()` 用 `taskkill /T`，新 worker 启动时再扫一遍 |
@@ -181,7 +181,7 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 - **DSH**：实测 0.2.1-rc.2 / Electron 44 / Node 24；DSH 仍在 rc，插件契约可能变。
 - **Node**：host 插件只用 `node:` 内置模块，≥22 即可。
 - **只读投影**：真相源仍是 DSH 会话日志，插件不写回；投影可丢弃可重建。
-- **分发状态**：包名 `dsh-native`；npm 上裸名目前仍是占位（`0.0.0-stage`），1.7.5 尚未发布，此前的安装一律走根目录 `bin/` 的 tarball、GitHub 源码或目录 link，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
+- **分发状态**：包名 `dsh-rust-exec`（npm 上尚未注册；`dsh-native` 上的 `0.0.0-stage` 是旧占位，不要装）。1.7.6 的安装包以 `dsh-rust-exec-1.7.6.tgz` 同时发布在 GitHub Release `v1.7.6` 与仓库根 `bin/`，也可走 GitHub 源码或目录 link，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
 
 ## 维护者
 
@@ -208,13 +208,13 @@ node tools\build_plugin.mjs --no-archive    # 只更新 bin/，不碰 dist/
 
 ## English
 
-**dsh-native** is a resident Rust sidecar for DeepSeek Harness. Command execution, sha256-guarded file IO, code indexing/search, session-log projection and resource sampling all run in a long-lived Rust worker; the host stays a thin JSON-RPC / lane-scheduling / route layer.
+**dsh-rust-exec** is a resident Rust sidecar for DeepSeek Harness. Command execution, sha256-guarded file IO, code indexing/search, session-log projection and resource sampling all run in a long-lived Rust worker; the host stays a thin JSON-RPC / lane-scheduling / route layer.
 
 - **11 tools** — 10 `rust_*` tools plus `native_help` (5 resident, 6 activated on demand)
 - **8 routes** — `/api/dsh-rust-exec/{metrics,cache,health,events,sessions,session,session/body,config}`
-- **UI** — pinned-header projection view, Grafana-style monitor, `dsh-native` resource strip
+- **UI** — pinned-header projection view, Grafana-style monitor, `dsh-rust-exec` resource strip
 - **Async start** — DSH boots first; the worker starts 1.2 s later and the UI back-fills data the moment `readiness` turns `ready`
-- **Install** — `pnpm add dsh-native`, add `dsh-native` to `dsh.profile.bundles`, restart DSH; or `npm i ./bin/dsh-native-1.7.5.tgz`
+- **Install** — `pnpm add dsh-rust-exec`, add `dsh-rust-exec` to `dsh.profile.bundles`, restart DSH; or `npm i ./bin/dsh-rust-exec-1.7.5.tgz`
 - **Source install** — `dsh plugin --profile web add github:keer1024/dsh-native#path:/packages/dsh-rust-exec`
 - **Requires** — Windows 10/11 x64 · DSH desktop · PowerShell 5.1 (no Node.js on the target machine)
 

@@ -208,10 +208,10 @@ function pruneWorkerBackups() {
  * 加 --ignore-scripts：打包阶段不该触发任何生命周期脚本。
  * npm 会把 tarball 写在当前工作目录，所以调用方需要负责搬运。
  *
- * npm 会把 scope 拼进文件名（`@keer1024/dsh-native` → `keer1024-dsh-native-1.6.2.tgz`），
- * 安装包对外只叫 `dsh-native-<version>.tgz`，所以打包后立刻把 scope 前缀去掉。
- * 前缀不写死，从 package.json 的 name 推导；无 scope 的包（1.7.0 起的 `dsh-native`）
- * npm 本来就产 `dsh-native-<version>.tgz`，这时不做改名，避免 rename 到自己报 ENOENT。
+ * npm 会把 scope 拼进文件名（`@keer1024/dsh-native` → `keer1024-dsh-rust-exec-1.6.2.tgz`），
+ * 安装包对外只叫 `dsh-rust-exec-<version>.tgz`，所以打包后立刻把 scope 前缀去掉。
+ * 前缀不写死，从 package.json 的 name 推导；无 scope 的包（1.7.0 起的 `dsh-rust-exec`）
+ * npm 本来就产 `dsh-rust-exec-<version>.tgz`，这时不做改名，避免 rename 到自己报 ENOENT。
  * @param {string} version 期望版本号，用于校验产物文件名
  * @returns {string} tarball 绝对路径（仍位于宿主包目录内）
  */

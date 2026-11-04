@@ -1,13 +1,13 @@
 {
-  "name": "dsh-native",
-  "version": "1.7.5",
+  "name": "dsh-rust-exec",
+  "version": "1.7.6",
   "type": "module",
   "main": "./index.js",
-  "description": "dsh-native: resident Rust worker (lane pool, session affinity, soft RSS/CPU limits) for command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; host-side JSON-RPC middleware with 8 HTTP routes and 11 tools, plus a pinned projection view, a Grafana-style monitor and a resource status strip.",
+  "description": "dsh-rust-exec: resident Rust worker (lane pool, session affinity, soft RSS/CPU limits) for command execution, sha256-guarded file IO, code indexing and search, session-log projection and resource sampling; host-side JSON-RPC middleware with 8 HTTP routes and 11 tools, plus a pinned projection view, a Grafana-style monitor and a resource status strip.",
   "keywords": [
     "dsh",
     "dsh-plugin",
-    "dsh-native",
+    "dsh-rust-exec",
     "rust",
     "sidecar",
     "powershell",

@@ -207,8 +207,8 @@ check(
 // ---- additive conversation view (conversation.view) ---------------------------
 const viewReg = registrations.find((r) => r.options.name === 'conversation.view')
 check('conversation view registered additively', Boolean(viewReg), viewReg ? JSON.stringify(viewReg.options) : 'missing')
-check('view id/order are ours', Boolean(viewReg) && viewReg.options.id === 'dsh-native-view' && viewReg.options.order === 20, viewReg ? viewReg.options.id + '/' + viewReg.options.order : '')
-check('view label localized', Boolean(viewReg) && /dsh-native/.test(String(viewReg.options.label())), viewReg ? String(viewReg.options.label()) : '')
+check('view id/order are ours', Boolean(viewReg) && viewReg.options.id === 'dsh-rust-exec-view' && viewReg.options.order === 20, viewReg ? viewReg.options.id + '/' + viewReg.options.order : '')
+check('view label localized', Boolean(viewReg) && /dsh-rust-exec/.test(String(viewReg.options.label())), viewReg ? String(viewReg.options.label()) : '')
 
 const viewHost = document.createElement('div')
 viewHost.id = 'view'

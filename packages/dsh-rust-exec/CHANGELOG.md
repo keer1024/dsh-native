@@ -2,6 +2,40 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.6 — 2026-11-04
+
+Rename plus a settings page that actually shows the switches the README documents. No tool schema,
+route or worker-binary change.
+
+### Changed — the package is now `dsh-rust-exec`
+- `package.json` name, bundle id in `cordis.patch.yml`, client registration ids (`dsh-rust-exec`,
+  `dsh-rust-exec-view`, `dsh-rust-exec-strip`), the state directory (`%LOCALAPPDATA%\dsh-rust-exec`)
+  and every visible label moved from `dsh-native` to `dsh-rust-exec`. The GitHub repository name,
+  its URL and the marketplace entry (`keer1024/dsh-native#packages/dsh-rust-exec`) are unchanged.
+- Upgrading from 1.7.5: change the `dependencies` key and the `dsh.profile.bundles` entry in the
+  profile to `dsh-rust-exec`, then `pnpm install` and restart DSH. `check_client_identity` now
+  asserts the new name end to end.
+
+### Added — feature switches in the settings page
+- The panel has a "Feature switches" section: `progressiveDisclosure`, `compactReads`,
+  `prewarmIndex`, `deferStart`, `startDelayMs` plus `maxShells`. They were documented in the README
+  but had no UI.
+- `POST /config` accepts those keys next to the six pool keys and answers with
+  `{ applied, switches, requiresReload }`; `requiresReload` lists the mount-time keys
+  (`progressiveDisclosure`, `prewarmIndex`, `deferStart`, `startDelayMs`).
+- Switches the loader config did not pin are written to `dsh-rust-exec/settings.json` (atomic
+  temp-file rename) and re-applied on the next mount; an explicit loader value still wins.
+
+### Fixed — the panel form was empty on a real host
+- `GET /metrics` returned only `lanes`, `maxQueueDepth` and `defaultTimeoutMs` in `config`, while the
+  form reads `maxWorkers`, `maxInFlightPerSession`, `idleReapMs`, `rssSoftLimitMb`,
+  `cpuSoftLimitPct`. The payload now carries the full settings snapshot, and `panel_render_test`
+  feeds a real-shaped payload instead of a hand-filled one.
+
+### Changed — artifact name
+- `bin/dsh-rust-exec-1.7.6.tgz` (+ `.sha256`); the tarball and the GitHub Release asset carry the
+  new name.
+
 ## 1.7.5 — 2026-11-04
 
 Housekeeping release: one visible label change, a README rewrite, and a storage rule that keeps the

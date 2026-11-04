@@ -147,7 +147,7 @@ try {
     renameSync(tmp, target)
   }, Math.max(5, Math.round(RUNS / 2)))
   // The worker rewrite saves a ~45 KB index cache on every write; check what writing that
-  // volume costs on this disk, independent of anything dsh-native does.
+  // volume costs on this disk, independent of anything dsh-rust-exec does.
   const heavy = 'x'.repeat(45_721)
   await time('native.tmpRename45k', (i) => {
     writeFileSync(tmp, heavy + i)

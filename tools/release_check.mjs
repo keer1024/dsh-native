@@ -42,7 +42,7 @@ version: ${version}
 - [ ] 全量回归：monitor_render_test / check_client_identity / harness / panel_render_test / projection_render_test / mount（DSH_PROFILE=mounttest）
 - [ ] 版本号（package.json）与 CHANGELOG（packages/dsh-rust-exec/CHANGELOG.md）
 - [ ] README：版本行、§3.2 包名、受影响的小节
-- [ ] 打包：node tools/build_plugin.mjs（或 --skip-rust）产出 bin/dsh-native-${version}.tgz + .sha256
+- [ ] 打包：node tools/build_plugin.mjs（或 --skip-rust）产出 bin/dsh-rust-exec-${version}.tgz + .sha256
 - [ ] commit + tag v${version} + SSH 推送
 - [ ] 镜像回工作区（_native/hold/mirror_to_workspace.ps1）并核对 SHA256
 - [ ] phase progress 一条（带证据）
@@ -115,10 +115,10 @@ function main() {
   const readme = path.join(ROOT, 'README.md');
   const readmeText = fs.existsSync(readme) ? fs.readFileSync(readme, 'utf8') : '';
   add(readmeText.includes(version), 'README 提到本版本号', 'readme 里找不到 ' + version);
-  add(readmeText.includes(`dsh-native-${version}.tgz`), 'README 的安装包名是本版本', `期望 dsh-native-${version}.tgz`);
+  add(readmeText.includes(`dsh-rust-exec-${version}.tgz`), 'README 的安装包名是本版本', `期望 dsh-rust-exec-${version}.tgz`);
 
   // 3) 安装包与校验和
-  const tarballName = `dsh-native-${version}.tgz`;
+  const tarballName = `dsh-rust-exec-${version}.tgz`;
   const tarball = path.join(BIN_DIR, tarballName);
   add(fs.existsSync(tarball), 'bin/ 有本版本安装包', path.relative(ROOT, tarball));
   if (fs.existsSync(tarball)) {
