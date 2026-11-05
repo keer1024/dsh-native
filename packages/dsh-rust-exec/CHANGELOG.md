@@ -2,6 +2,44 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.7 — 2026-11-05
+
+Two reports from the 1.7.6 build: the monitor dialog opened at the bottom of the conversation and
+let the wheel scroll the page, and the documented per-tool switches were still nowhere in the UI.
+
+### Fixed — the monitor dialog is a real top-layer overlay
+- The dialog used `position: fixed` but rendered inside `conversation.composer.dock`. Ancestor
+  `transform`/`contain` (the composer card) makes a fixed element relative to that ancestor, which
+  is why it appeared pinned to the bottom of the conversation instead of the viewport. It is now
+  portaled to `document.body` with `react-dom`'s `createPortal` — the same thing the host's own
+  schedule overlay does — with an inline fallback when `react-dom` is not reachable.
+- Opening it locks page scroll (`document.body.style.overflow = 'hidden'`, previous value restored
+  on close) and the panel uses `overscroll-behavior: contain`. A wheel listener on the overlay stops
+  propagation, so a wheel over the dialog never reaches the conversation's scroll container.
+- `tools/monitor_render_test.mjs` grew an 8-check block for exactly this: portaled onto `body`, not
+  inside the slot subtree, fixed overlay with `zIndex >= 2147483000`, `overflow: auto` +
+  `overscroll-behavior: contain`, body locked while open, document-level wheel handler must stay
+  silent, body scroll restored on close. Five of them fail against 1.7.6.
+
+### Added — per-tool switches ("工具管理")
+- The settings tab lists all eleven tools (`rust_exec`, `rust_read`, `rust_search`, `rust_health`,
+  `native_help` and the six dormant ones) with a switch each, showing how many are registered.
+- Toggling is live: `ctx.tools.register()` returns the exact disposer for that tool, so switching
+  off calls it and switching on registers again — no plugin reload, and the native tool of the same
+  name gets the slot back. The state is read from the registry (`GET /metrics.tools`), not from the
+  settings file, so the panel cannot claim a tool is on while it is not.
+- `POST /config` accepts `{ tools: { <name>: boolean } }` next to the existing keys, ignores unknown
+  names, persists the result under `settings.json`'s `tools` object, and answers with `tools`.
+- `tools/tool_switch_test.mjs` mounts the plugin on a fake Cordis context and asserts: 11 registered
+  by default, a switch really disposes (and the recorded disposer ran), `/metrics` reflects the live
+  registry while `config.tools` keeps the intent, switching back re-registers, an unknown name is
+  ignored, and the value lands in `settings.json`.
+
+### Changed — the panel test reads the repository, not the workspace copy
+- `tools/panel_render_test.mjs` used to load `client.js` from the dev workspace mirror, so edits in
+  the repository were invisible to it (a tool card added in the repo never appeared in the test).
+  It now resolves the source from the repository like the monitor test does.
+
 ## 1.7.6 — 2026-11-04
 
 Rename plus a settings page that actually shows the switches the README documents. No tool schema,

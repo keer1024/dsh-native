@@ -8,6 +8,7 @@ import path from 'node:path'
 const ROOT = 'C:/Users/keer_/Documents/deepseek-harness/default-workspace'
 const require = createRequire(path.join(ROOT, '_bench/panel-test/'))
 const React = require('react')
+const ReactDOM = require('react-dom')
 const ReactDOMClient = require('react-dom/client')
 const { JSDOM } = require('jsdom')
 
@@ -35,6 +36,7 @@ dom.window.__ModuleLoader__ = {
   load(mod) {
     captured = { id: mod.id, mod: mod.factory((name) => {
       if (name === 'react') return React
+      if (name === 'react-dom') return ReactDOM
       throw new Error('unexpected require: ' + name)
     }) }
   },

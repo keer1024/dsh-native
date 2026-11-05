@@ -4,9 +4,14 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+// 依赖来自开发工作区的缓存（仓库本身不带 node_modules），但被测源码必须来自本仓库：
+// 之前这里也读工作区副本，结果改了仓库里的 client.js 而测试仍在跑旧代码。
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROOT = 'C:/Users/keer_/Documents/deepseek-harness/default-workspace'
 const require = createRequire(path.join(ROOT, '_bench/panel-test/'))
 const React = require('react')
+const ReactDOM = require('react-dom')
 const ReactDOMClient = require('react-dom/client')
 const { JSDOM } = require('jsdom')
 
@@ -29,12 +34,13 @@ dom.window.__ModuleLoader__ = {
   load({ id, factory }) {
     captured = { id, mod: factory((name) => {
       if (name === 'react') return React
+      if (name === 'react-dom') return ReactDOM
       throw new Error('unexpected require: ' + name)
     }) }
   },
 }
 
-const source = readFileSync(path.join(ROOT, 'packages/dsh-rust-exec/client.js'), 'utf8')
+const source = readFileSync(path.join(REPO, 'packages/dsh-rust-exec/client.js'), 'utf8')
 await import('data:text/javascript;base64,' + Buffer.from(source, 'utf8').toString('base64'))
 if (!captured) throw new Error('module loader was not called')
 console.log('module id:', captured.id, '| keys:', Object.keys(captured.mod).join(','))
@@ -112,6 +118,11 @@ const sample = {
     maxShells: 8, startDelayMs: 1200, progressiveDisclosure: true, compactReads: false,
     prewarmIndex: true, deferStart: true, lanes: 4, maxQueueDepth: 64, defaultTimeoutMs: 120000,
   },
+  // 工具管理（1.7.7）：/metrics 回报每个工具此刻是否在注册表里。
+  tools: {
+    rust_exec: true, rust_read: true, rust_search: true, rust_health: true, native_help: true,
+    rust_write: true, rust_edit: true, rust_stat: true, rust_ls: true, rust_symbols: true, rust_session_open: true,
+  },
 }
 mode = 'live'
 try {
@@ -185,6 +196,36 @@ if (button) {
     check('POST carries pool keys', body.maxWorkers !== undefined && body.cpuSoftLimitPct !== undefined, JSON.stringify(body).slice(0, 140))
     check('POST carries the toggled switch', body.compactReads === true, JSON.stringify(body).slice(0, 140))
     check('apply feedback shown', /applied/.test(text()), text().slice(-140))
+  }
+}
+
+// 6) 工具管理（用户 m01036）：逐工具开关。1.7.6 只有五个功能开关，没有办法单独停用
+// 某个工具；这一节要求面板能列出每个 rust_* 工具并把它关掉。
+const TOOL_NAMES = ['rust_exec', 'rust_read', 'rust_search', 'rust_health', 'native_help',
+  'rust_write', 'rust_edit', 'rust_stat', 'rust_ls', 'rust_symbols', 'rust_session_open']
+{
+  const rows = [...document.querySelectorAll('#root [data-dsh-rust-tool]')]
+  const named = rows.map((row) => row.getAttribute('data-dsh-rust-tool'))
+  check('per-tool switches rendered for every tool', rows.length === TOOL_NAMES.length,
+    rows.length + '/' + TOOL_NAMES.length + ' ' + named.join(','))
+  check('per-tool rows name every rust tool',
+    TOOL_NAMES.every((name) => named.includes(name)), named.join(','))
+  const writeRow = rows.find((row) => row.getAttribute('data-dsh-rust-tool') === 'rust_write')
+  const toggle = writeRow?.querySelector('[role=switch]')
+  check('per-tool row carries a switch in the on state',
+    toggle?.getAttribute('aria-checked') === 'true', toggle?.getAttribute('aria-checked') || 'missing')
+  const propsKey = toggle && Object.keys(toggle).find((k) => k.startsWith('__reactProps'))
+  check('per-tool switch is bound to a handler', Boolean(propsKey && toggle[propsKey]?.onClick))
+  if (propsKey && toggle[propsKey]?.onClick) {
+    const before = posts.filter((p) => p.init?.method === 'POST').length
+    await act(async () => {
+      await toggle[propsKey].onClick()
+      await new Promise((r) => setTimeout(r, 150))
+    })
+    const toolPosts = posts.filter((p) => p.init?.method === 'POST').slice(before)
+    const body = toolPosts.length ? JSON.parse(toolPosts[toolPosts.length - 1].init.body) : {}
+    check('toggling a tool posts only that tool', Boolean(body.tools) && body.tools.rust_write === false,
+      JSON.stringify(body).slice(0, 160))
   }
 }
 

@@ -237,6 +237,14 @@ function coreCount() {
  * 把校验过的原始配置补成完整配置对象：每个键独立回退默认值，未知键直接丢弃。
  * lanes 未指定时取核数的一半（至少 1、至多 DEFAULT_LANES），避免小机器起太多 shell。
  */
+function normalizeToolSwitches(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const out = {}
+  // 缺省全开：升级不会因为缺少这个键而让工具凭空消失。
+  for (const name of ALL_TOOL_NAMES) out[name] = source[name] === false ? false : true
+  return out
+}
+
 function normalizeConfig(value) {
   const raw = value && typeof value === 'object' ? value : {}
   const lanes = Number.isInteger(raw.lanes) && raw.lanes >= 1 && raw.lanes <= MAX_LANES
@@ -297,6 +305,8 @@ function normalizeConfig(value) {
     // The worker skips index prewarm when this is false; the host triggers the
     // build once the plugin reports ready, so nothing competes with DSH startup.
     prewarmIndex: raw.prewarmIndex !== false,
+    // 逐工具开关（1.7.7）：缺省全开，面板里关掉的工具不会注册（也就能让原生工具接管）。
+    tools: normalizeToolSwitches(raw.tools),
   }
 }
 
@@ -356,7 +366,7 @@ const FEATURE_KEYS = ['progressiveDisclosure', 'compactReads', 'prewarmIndex', '
 /** Pool settings the panel can also change; they persist next to the switches. */
 const POOL_SETTING_KEYS = ['maxWorkers', 'maxShells', 'maxInFlightPerSession', 'idleReapMs', 'rssSoftLimitMb', 'cpuSoftLimitPct']
 /** Everything `settings.json` remembers; a loader value for the same key still wins. */
-const PERSISTED_KEYS = [...FEATURE_KEYS, ...POOL_SETTING_KEYS]
+const PERSISTED_KEYS = [...FEATURE_KEYS, ...POOL_SETTING_KEYS, 'tools']
 
 /** Pick only the feature switches out of an arbitrary object; unknown keys are ignored. */
 function pickFeatureSettings(value) {
@@ -365,6 +375,19 @@ function pickFeatureSettings(value) {
   for (const key of FEATURE_KEYS) {
     if (value[key] === undefined || value[key] === null) continue
     out[key] = value[key]
+  }
+  return out
+}
+
+/**
+ * Pick per-tool switches out of a request body. Only booleans on known tool names are
+ * accepted — anything else is dropped, so a typo cannot create a tool nobody registers.
+ */
+function pickToolSettings(value) {
+  const out = {}
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return out
+  for (const name of ALL_TOOL_NAMES) {
+    if (typeof value[name] === 'boolean') out[name] = value[name]
   }
   return out
 }
@@ -2197,6 +2220,12 @@ function renderHealth(value) {
 const RESIDENT_TOOL_NAMES = ['rust_exec', 'rust_read', 'rust_search', 'rust_health', 'native_help']
 /** Published only after `native_help` activates them (see §progressive disclosure). */
 const DORMANT_TOOL_NAMES = ['rust_write', 'rust_edit', 'rust_stat', 'rust_ls', 'rust_symbols', 'rust_session_open']
+/**
+ * Every tool the plugin can publish, in the order the settings panel lists them.
+ * The per-tool switches (1.7.7) key off exactly this set: a name outside it is ignored
+ * rather than persisted, so a typo cannot invent a tool that is never registered.
+ */
+const ALL_TOOL_NAMES = [...RESIDENT_TOOL_NAMES, ...DORMANT_TOOL_NAMES]
 /** One-line usage per dormant tool, printed only when it is activated. */
 const DORMANT_TOOL_HINTS = {
   rust_write: 'path, content, expectedHash (sha prefix from rust_read, or "absent" to require a new file)',
@@ -2980,6 +3009,8 @@ class MetricsStore {
       // 报表字段独立成块：旧前端不认识它，新前端缺它时整行显示 `—`。
       savings: this.savingsSnapshot(),
       readiness: this.readiness ?? null,
+      // 逐工具开关（1.7.7）：每个工具此刻是否真的在注册表里。
+      tools: this.toolState ? this.toolState() : {},
       config: {
         // The panel renders every tunable from this block, so it must carry the full
         // effective settings — not just the three pool keys it used to publish.
@@ -3344,12 +3375,26 @@ function installRoutes(ctx, { store, pool, settings, log, state }) {
           // `persistSettings` keeps only the known keys, and a loader-pinned key still
           // wins on the next mount (`mergePersistedSettings`).
           if (changed) persistSettings(settings)
+          // 逐工具开关（1.7.7）：热生效——注册表当场增删，不需要重新挂载插件。
+          const requestedTools = pickToolSettings(body.tools)
+          const appliedTools = {}
+          if (Object.keys(requestedTools).length > 0 && typeof state.setToolEnabled === 'function') {
+            for (const [name, enabled] of Object.entries(requestedTools)) {
+              if (!state.setToolEnabled(name, enabled)) continue
+              appliedTools[name] = enabled
+            }
+            if (Object.keys(appliedTools).length > 0) {
+              changed = true
+              persistSettings(settings)
+            }
+          }
           const requiresReload = Object.keys(switches).filter((key) => MOUNT_TIME_KEYS.includes(key))
-          log.info('config.update', { applied, switches, requiresReload })
+          log.info('config.update', { applied, switches, requiresReload, tools: appliedTools })
           send(res, 200, {
-            applied,
+            applied: Object.keys(appliedTools).length > 0 ? { ...applied, tools: appliedTools } : applied,
             switches: pickFeatureSettings(settings),
             requiresReload,
+            tools: typeof state.toolState === 'function' ? state.toolState() : {},
             pool: pool.info(),
           })
         } catch (error) {
@@ -3557,6 +3602,8 @@ export function apply(ctx, config) {
   // `/metrics` renders the same readiness object the panel polls through `/health`, so the
   // two views can never disagree about whether the worker is up.
   store.readiness = runtime.readiness
+  // `/metrics` 的 tools 块来自注册表本身；开关生效与否，面板看到的是真值而不是意图。
+  store.toolState = () => (runtime.toolState ? runtime.toolState() : {})
   // 延迟启动：定时器 unref，并登记到 ctx.effect，插件先卸载时不会留下孤儿定时器。
   if (settings.deferStart) {
     const startTimer = setTimeout(() => { void runtime.ensureStarted() }, settings.startDelayMs)
@@ -3577,6 +3624,8 @@ export function apply(ctx, config) {
     const disposers = new Map()
     const registerTool = (name) => {
       if (disposers.has(name)) return
+      // 逐工具开关（1.7.7）：关掉的工具不注册，原生同名工具才有机会被模型看到。
+      if (settings.tools?.[name] === false) return
       const definition = byName.get(name)
       if (!definition) return
       try {
@@ -3604,6 +3653,34 @@ export function apply(ctx, config) {
       return activated
     }
     runtime.activeTools = () => [...disposers.keys()]
+    /**
+     * 逐工具开关（1.7.7）：`register()` 返回的就是精确的注销函数
+     * （dsh-tools: "returns the exact disposer that unregisters the tool"），所以关掉一个
+     * 工具不需要重新挂载插件，打开就是再注册一次。返回是否真正改到了注册表。
+     */
+    runtime.setToolEnabled = (name, enabled) => {
+      if (!ALL_TOOL_NAMES.includes(name)) return false
+      settings.tools = { ...settings.tools, [name]: enabled }
+      if (enabled) {
+        registerTool(name)
+        return disposers.has(name)
+      }
+      const dispose = disposers.get(name)
+      if (!dispose) return true
+      try {
+        dispose()
+      } catch (error) {
+        log.warn('tools.dispose-failed', { name, error: error?.message })
+      }
+      disposers.delete(name)
+      return true
+    }
+    /** 注册表的真值（而不是 settings.json 里的意图），面板与 /metrics 都读它。 */
+    runtime.toolState = () => {
+      const out = {}
+      for (const name of ALL_TOOL_NAMES) out[name] = disposers.has(name)
+      return out
+    }
     log.info('tools.registered', { count: disposers.size, progressiveDisclosure: settings.progressiveDisclosure })
     return () => {
       for (const dispose of [...disposers.values()].reverse()) dispose()

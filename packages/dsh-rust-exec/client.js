@@ -25,6 +25,17 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const { useEffect, useMemo, useRef, useState } = React
+    // 浮层必须挂到 body：dock / 会话树的祖先常带 transform 或 contain，那会让
+    // position:fixed 变成相对祖先定位（实测症状：弹窗贴在会话底部，滚轮还会带动
+    // 会话滚动）。宿主自己的浮层也是这么做的，见 dsh-client-ui-schedule 的
+    // createPortal(node, document.body)。拿不到 react-dom 时退回就地渲染。
+    const createPortal = (() => {
+      try {
+        return require('react-dom').createPortal ?? null
+      } catch {
+        return null
+      }
+    })()
 
     // API 前缀、轮询周期、曲线保留点数（1 s × 120 ≈ 最近 2 分钟）。
     const API = '/api/dsh-rust-exec'
@@ -523,6 +534,11 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontSize: 10.5, opacity: 0.55 } },
             'Switches persist to settings.json; an explicit loader config still wins.'),
         ) : null,
+
+        h(ToolsCard, {
+          tools: data?.tools ?? config?.tools ?? null,
+          onChanged: () => setNonce((value) => value + 1),
+        }),
 
         h(SessionProjectionCard),
       )
@@ -1962,6 +1978,57 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 工具管理（1.7.7，用户 m01036）：逐工具开关。状态读 `/metrics.tools`（注册表真值，
+    // 不是 settings.json 里的意图），拨动即 POST /config 热生效，再让面板重拉一次。
+    function ToolsCard({ tools, onChanged }) {
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+      if (!tools) return null
+      const names = Object.keys(tools)
+      const flip = async (name, next) => {
+        setBusy(name)
+        setError('')
+        try {
+          const res = await fetch(API + '/config', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ tools: { [name]: next } }),
+          })
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status)
+          onChanged()
+        } catch (err) {
+          setError(err.message || String(err))
+        } finally {
+          setBusy('')
+        }
+      }
+      const on = names.filter((name) => tools[name]).length
+      return h('div', {
+        'data-dsh-rust-tools': 'card',
+        style: { display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)', paddingTop: 12 },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+          h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, pick('工具管理', 'Tool management')),
+          h('div', { style: { fontSize: 10.5, opacity: 0.55 } },
+            on + '/' + names.length + ' ' + pick('已注册 · 关掉即从注册表移除，原生同名工具接管', 'registered · off removes it from the registry')),
+        ),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start' } },
+          ...names.map((name) => h('div', {
+            key: name,
+            'data-dsh-rust-tool': name,
+            style: { display: 'flex', minWidth: 210, flex: '1 1 210px', opacity: busy === name ? 0.6 : 1 },
+          }, h(Toggle, {
+            label: name,
+            hint: tools[name] ? pick('已注册', 'registered') : pick('已关闭', 'off'),
+            value: Boolean(tools[name]),
+            onChange: (next) => { void flip(name, next) },
+          }))),
+        ),
+        error ? h('div', { role: 'alert', style: { fontSize: 11, color: COLORS.bad } }, error) : null,
+      )
+    }
+
     // 监控弹窗：固定深色面板；Escape 或点遮罩关闭，phase 决定状态灯与标题文案。
     function MonitorDialog({ onClose }) {
       const { data, error, sessions: sessionLogs, health, cache } = useMetrics(POLL_MS, 0, true)
@@ -1974,6 +2041,7 @@ window.__ModuleLoader__.load({
       const running = Boolean(data?.running)
       // Charts are bound to one worker; clicking a worker card switches them.
       const [selectedWorker, setSelectedWorker] = useState(0)
+      const overlayRef = useRef(null)
 
       // 全局 Escape 关闭；onClose 变化时重新绑定，卸载时解绑。
       useEffect(() => {
@@ -1982,11 +2050,29 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('keydown', onKey)
       }, [onClose])
 
+      // 打开期间锁住页面滚动，关掉后把原来的值放回去（不假设它本来是空的）。
+      useEffect(() => {
+        const body = document.body
+        const previous = body.style.overflow
+        body.style.overflow = 'hidden'
+        return () => { body.style.overflow = previous }
+      }, [])
+
+      // 滚轮只允许滚弹窗自己：在遮罩层截断传播，会话页面收不到这个事件。
+      useEffect(() => {
+        const node = overlayRef.current
+        if (!node) return undefined
+        const stopWheel = (event) => { event.stopPropagation() }
+        node.addEventListener('wheel', stopWheel, { passive: true })
+        return () => node.removeEventListener('wheel', stopWheel)
+      }, [])
+
       // Projection detail for the newest sessions; same poll loop, no extra timer.
       const sessionDetails = useSessionDetails(sessionLogs)
 
-      return h('div', {
+      const overlay = h('div', {
         'data-dsh-rust-monitor': 'dialog',
+        ref: overlayRef,
         style: {
           position: 'fixed', inset: 0, zIndex: 2147483000, background: 'rgba(0,0,0,0.58)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
@@ -1998,6 +2084,8 @@ window.__ModuleLoader__.load({
           'aria-label': pick('dsh-rust-exec 性能监控', 'dsh-rust-exec performance monitor'),
           style: {
             width: 'min(1100px, 96vw)', maxHeight: '75vh', overflow: 'auto',
+            // 到边界也不把滚轮链给页面（scroll chaining）。
+            overscrollBehavior: 'contain',
             background: MONITOR_COLORS.bg, color: MONITOR_COLORS.text,
             border: '1px solid ' + MONITOR_COLORS.border, borderRadius: 10,
             padding: '14px 16px 18px', boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
@@ -2055,6 +2143,7 @@ window.__ModuleLoader__.load({
           ) : null,
         ),
       )
+      return createPortal ? createPortal(overlay, document.body) : overlay
     }
 
     // 输入框下方的一行常驻资源摘要：整条可点开监控弹窗（Esc 关闭），拿不到采样时整条不渲染。

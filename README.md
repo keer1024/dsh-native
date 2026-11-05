@@ -7,7 +7,7 @@
 <p align="center"><code>a resident Rust sidecar for DeepSeek Harness</code></p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.6-2f6fed?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.7-2f6fed?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/DSH-desktop-6f42c1?style=flat-square">
@@ -74,10 +74,10 @@ curl http://127.0.0.1:<port>/api/dsh-rust-exec/health
 
 ```powershell
 # 先校验（可选但推荐）
-Get-FileHash .\bin\dsh-rust-exec-1.7.6.tgz -Algorithm SHA256
-# 与 bin\dsh-rust-exec-1.7.6.tgz.sha256 里的摘要比对
+Get-FileHash .\bin\dsh-rust-exec-1.7.7.tgz -Algorithm SHA256
+# 与 bin\dsh-rust-exec-1.7.7.tgz.sha256 里的摘要比对
 
-npm i .\bin\dsh-rust-exec-1.7.6.tgz
+npm i .\bin\dsh-rust-exec-1.7.7.tgz
 ```
 
 目标机要求、profile 两处改动、SmartScreen 与常见失败见 [分发与跨机安装](docs/rust-exec-plugin/DISTRIBUTION.md)。
@@ -132,7 +132,7 @@ dsh plugin --profile web add github:keer1024/dsh-native#path:/packages/dsh-rust-
 | `GET /sessions` | 可投影的会话列表（≤50，按 mtime 倒序） |
 | `GET /session?id=&limit=&cursor=` | 单个会话的分页投影（`mode=append/warm/head`、耗时分解） |
 | `GET /session/body?id=&seqs=&maxChars=` | 指定 seq 的消息正文（最多 40 个 seq，缺 `seqs` → 400） |
-| `POST /config` | 热改配置：6 个池键（`maxWorkers`/`maxShells`/`maxInFlightPerSession`/`idleReapMs`/`rssSoftLimitMb`/`cpuSoftLimitPct`）+ 5 个功能开关（`progressiveDisclosure`/`compactReads`/`prewarmIndex`/`deferStart`/`startDelayMs`）；返回 `applied`/`switches`/`requiresReload` |
+| `POST /config` | 热改配置：6 个池键（`maxWorkers`/`maxShells`/`maxInFlightPerSession`/`idleReapMs`/`rssSoftLimitMb`/`cpuSoftLimitPct`）+ 5 个功能开关（`progressiveDisclosure`/`compactReads`/`prewarmIndex`/`deferStart`/`startDelayMs`）+ `tools` 逐工具开关；返回 `applied`/`switches`/`requiresReload`/`tools` |
 
 浏览器带会话凭据，Node 侧直接 `fetch` 会拿到 401。
 
@@ -159,8 +159,8 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 | `progressiveDisclosure` | 布尔，默认 `true` | ✔ | 重启 | 5 常驻 + 6 按需；`false` 恢复 11 个全常驻 |
 | `compactReads` | 布尔，默认 `false` | ✔ | 立即 | `rust_read` 默认压缩（去注释、折叠缩进，行号仍有效） |
 
-环境变量：`DSH_HOME`、`DSH_PROFILE`、`DSH_RUST_WORKER_CWD`、`DSH_RUST_DEBUG`、`DSH_RUST_PREWARM`、`DSH_VERSION`。
-锁文件 `<DSH_HOME>/run/dsh-rust-worker-<profile>.lock` 由宿主写，回收前核对进程镜像名，不按 pid 盲杀。
+逐工具开关（1.7.7）：设置页的「工具管理」按工具列出全部 11 个开关。关掉一个就当场从注册表移除（`ctx.tools.register` 返回的正是精确 disposer），打开即重新注册，不用重载插件；状态存 `settings.json` 的 `tools` 对象，loader 里显式写了 `tools` 仍以 loader 为准。这样原生同名工具才有机会接管——插件本身不做 unregister。
+环境变量：`DSH_HOME`、`DSH_PROFILE`、`DSH_RUST_WORKER_CWD`、`DSH_RUST_DEBUG`、`DSH_RUST_PREWARM`、`DSH_VERSION`。锁文件 `<DSH_HOME>/run/dsh-rust-worker-<profile>.lock` 由宿主写，回收前核对进程镜像名，不按 pid 盲杀。
 诊断日志：`%LOCALAPPDATA%\dsh-rust-exec\logs\rust-exec-<宿主 pid>.log`（JSONL，2 MB 轮转）。
 
 ## 排障
@@ -181,7 +181,7 @@ Loader 行的 `config` 由 `Config['~standard'].validate` 校验，非法值直�
 - **DSH**：实测 0.2.1-rc.2 / Electron 44 / Node 24；DSH 仍在 rc，插件契约可能变。
 - **Node**：host 插件只用 `node:` 内置模块，≥22 即可。
 - **只读投影**：真相源仍是 DSH 会话日志，插件不写回；投影可丢弃可重建。
-- **分发状态**：包名 `dsh-rust-exec`（npm 上尚未注册；`dsh-native` 上的 `0.0.0-stage` 是旧占位，不要装）。1.7.6 的安装包以 `dsh-rust-exec-1.7.6.tgz` 同时发布在 GitHub Release `v1.7.6` 与仓库根 `bin/`，也可走 GitHub 源码或目录 link，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
+- **分发状态**：包名 `dsh-rust-exec`（npm 上尚未注册；`dsh-native` 上的 `0.0.0-stage` 是旧占位，不要装）。1.7.7 的安装包以 `dsh-rust-exec-1.7.7.tgz` 同时发布在 GitHub Release `v1.7.7` 与仓库根 `bin/`，也可走 GitHub 源码或目录 link，步骤见 [DISTRIBUTION.md](docs/rust-exec-plugin/DISTRIBUTION.md)。
 
 ## 维护者
 

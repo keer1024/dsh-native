@@ -12,6 +12,7 @@ const DEPS = process.env.DSH_NATIVE_DEPS
   ?? 'C:/Users/keer_/Documents/deepseek-harness/default-workspace/_bench/panel-test/'
 const require = createRequire(path.join(DEPS, 'entry.js'))
 const React = require('react')
+const ReactDOM = require('react-dom')
 const ReactDOMClient = require('react-dom/client')
 const { JSDOM } = require('jsdom')
 
@@ -39,6 +40,7 @@ dom.window.__ModuleLoader__ = {
   load(mod) {
     captured = { id: mod.id, mod: mod.factory((name) => {
       if (name === 'react') return React
+      if (name === 'react-dom') return ReactDOM
       throw new Error('unexpected require: ' + name)
     }) }
   },
@@ -231,12 +233,41 @@ await render(byId('dsh-rust-exec-strip').Component)
     Boolean(strip) && strip.getAttribute('role') === 'button' && strip.getAttribute('tabindex') === '0')
   check('strip advertises the click target', /监控|monitor/i.test(strip?.getAttribute('title') || ''), strip?.getAttribute('title') || '')
   await click(strip)
-  check('clicking the strip opens the monitor dialog', Boolean(rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')))
+  check('clicking the strip opens the monitor dialog', Boolean(document.querySelector('[data-dsh-rust-monitor="dialog"]')))
   await act(async () => {
     dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   })
   await settle(220)
-  check('Escape closes the strip-opened dialog', !rootEl.querySelector('[data-dsh-rust-monitor="dialog"]'))
+  check('Escape closes the strip-opened dialog', !document.querySelector('[data-dsh-rust-monitor="dialog"]'))
+}
+
+console.log('\n=== dialog is a top-layer overlay, not a slot subtree ===')
+await render(byId('dsh-rust-exec-strip').Component)
+{
+  const strip = rootEl.querySelector('[data-dsh-rust-strip="summary"]')
+  await click(strip)
+  const overlay = document.querySelector('[data-dsh-rust-monitor="dialog"]')
+  check('dialog is portaled straight onto document.body', overlay?.parentElement === document.body,
+    overlay?.parentElement?.tagName || 'missing')
+  check('dialog is not inside the composer slot subtree', Boolean(overlay) && !rootEl.contains(overlay))
+  check('overlay pins to the viewport', overlay?.style.position === 'fixed' && Number(overlay?.style.zIndex) >= 2147483000,
+    (overlay?.style.position || '') + '/' + (overlay?.style.zIndex || ''))
+  const panel = overlay?.querySelector('[role="dialog"]')
+  check('panel scrolls itself with overscroll contained',
+    panel?.style.overflow === 'auto' && panel?.style.overscrollBehavior === 'contain',
+    (panel?.style.overflow || '') + '/' + (panel?.style.overscrollBehavior || ''))
+  check('opening the dialog locks page scroll', document.body.style.overflow === 'hidden', document.body.style.overflow || '(unset)')
+  let wheelSeen = 0
+  const onWheel = () => { wheelSeen++ }
+  document.addEventListener('wheel', onWheel)
+  panel.dispatchEvent(new dom.window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 }))
+  document.removeEventListener('wheel', onWheel)
+  check('wheel over the dialog never reaches the page', wheelSeen === 0, String(wheelSeen))
+  await act(async () => {
+    dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  })
+  await settle(220)
+  check('closing the dialog restores page scroll', document.body.style.overflow === '', document.body.style.overflow || '(unset)')
 }
 
 console.log('\n=== settings tab toolbar + Grafana monitor dialog ===')
@@ -246,11 +277,11 @@ console.log('  collapsed text:', text().slice(0, 160))
 const monitorButtons = buttons().filter((b) => /^(监控器|Monitor)$/.test((b.textContent || '').trim()))
 check('exactly one monitor entry in the tab', monitorButtons.length === 1, String(monitorButtons.length))
 check('legacy resource-monitor buttons are gone', !/资源监控明细|Monitor detail/.test(text()))
-check('dialog closed by default', !rootEl.querySelector('[data-dsh-rust-monitor="dialog"]'))
+check('dialog closed by default', !document.querySelector('[data-dsh-rust-monitor="dialog"]'))
 await click(monitorButtons[0])
 await settle(320)
 console.log('  open text:', text().slice(0, 300))
-const dialog = rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')
+const dialog = document.querySelector('[data-dsh-rust-monitor="dialog"]')
 check('monitor dialog opens', Boolean(dialog))
 const cards = dialog ? [...dialog.querySelectorAll('[data-dsh-rust-monitor-card]')] : []
 check('stat cards rendered', cards.length >= 8, String(cards.length))
@@ -308,7 +339,7 @@ check('monitor dialog height drops to 75vh',
   const savedSavings = METRICS.savings
   delete METRICS.savings
   await settle(1400)
-  const live = rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')
+  const live = document.querySelector('[data-dsh-rust-monitor="dialog"]')
   check('savings cards degrade to dashes without data',
     !live ? false : ['savings-fixed', 'savings-total', 'savings-time', 'savings-index']
       .every((id) => /—/.test(live.querySelector(`[data-dsh-info="${id}"]`)?.textContent || '')),
@@ -322,7 +353,7 @@ check('monitor dialog height drops to 75vh',
   SESSIONS = { sessions: [] }
   METRICS.pool.sessions = []
   await settle(1600)
-  const live = rootEl.querySelector('[data-dsh-rust-monitor="dialog"]')
+  const live = document.querySelector('[data-dsh-rust-monitor="dialog"]')
   check('deleted session card disappears on the next poll',
     !live?.querySelector('[data-dsh-info^="session-"]'),
     String(live?.querySelectorAll('[data-dsh-info^="session-"]').length ?? -1) + ' card(s) left')
@@ -333,7 +364,7 @@ await act(async () => {
   dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 })
 await settle(220)
-check('Escape closes the dialog', !rootEl.querySelector('[data-dsh-rust-monitor="dialog"]'))
+check('Escape closes the dialog', !document.querySelector('[data-dsh-rust-monitor="dialog"]'))
 
 console.log('\n=== monitor refresh button ===')
 const refresh = buttons().find((b) => /^(刷新|Refresh)$/.test((b.textContent || '').trim()))
