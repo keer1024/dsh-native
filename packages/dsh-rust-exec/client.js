@@ -536,7 +536,8 @@ window.__ModuleLoader__.load({
         ) : null,
 
         h(ToolsCard, {
-          tools: data?.tools ?? config?.tools ?? null,
+          tools: data?.tools ?? null,
+          wanted: config?.tools ?? null,
           onChanged: () => setNonce((value) => value + 1),
         }),
 
@@ -1980,11 +1981,20 @@ window.__ModuleLoader__.load({
 
     // 工具管理（1.7.7，用户 m01036）：逐工具开关。状态读 `/metrics.tools`（注册表真值，
     // 不是 settings.json 里的意图），拨动即 POST /config 热生效，再让面板重拉一次。
-    function ToolsCard({ tools, onChanged }) {
+    function ToolsCard({ tools, wanted, onChanged, dark }) {
       const [busy, setBusy] = useState('')
       const [error, setError] = useState('')
-      if (!tools) return null
-      const names = Object.keys(tools)
+      // 本地镜像：监控弹窗的轮询不带 nonce，关掉一个开关后只能靠这里立刻反映，
+      // 否则按钮要等下一次轮询才变（看起来像没生效）。
+      const [local, setLocal] = useState(() => (tools ? { ...tools } : null))
+      useEffect(() => { setLocal(tools ? { ...tools } : null) }, [tools])
+      if (!local) return null
+      const names = Object.keys(local)
+      // 三种状态得分开说：progressive disclosure 打开时，懒加载的工具没进注册表，
+      // 但它不是「被关掉」——把两者混成一句「已停用」就是在骗人。
+      const hintFor = (name) => (local[name]
+        ? pick('已注册', 'registered')
+        : (wanted && wanted[name] === false ? pick('已关闭', 'off') : pick('未加载 · 用到时才注册', 'not loaded yet')))
       const flip = async (name, next) => {
         setBusy(name)
         setError('')
@@ -1996,21 +2006,25 @@ window.__ModuleLoader__.load({
           })
           const body = await res.json().catch(() => ({}))
           if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status)
-          onChanged()
+          // 以宿主回执为准；回执缺这一项时退回本地翻转。
+          const applied = body?.tools && typeof body.tools === 'object' ? body.tools : null
+          setLocal((prev) => ({ ...prev, ...(applied ?? { [name]: next }) }))
+          if (typeof onChanged === 'function') onChanged()
         } catch (err) {
           setError(err.message || String(err))
         } finally {
           setBusy('')
         }
       }
-      const on = names.filter((name) => tools[name]).length
+      const on = names.filter((name) => local[name]).length
+      const border = dark ? MONITOR_COLORS.border : 'color-mix(in srgb, currentColor 12%, transparent)'
       return h('div', {
         'data-dsh-rust-tools': 'card',
-        style: { display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)', paddingTop: 12 },
+        style: { display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid ' + border, paddingTop: 12 },
       },
-        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
-          h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, pick('工具管理', 'Tool management')),
-          h('div', { style: { fontSize: 10.5, opacity: 0.55 } },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+          h('div', { style: { fontSize: 12, fontWeight: 600, color: dark ? MONITOR_COLORS.text : undefined, opacity: dark ? 1 : 0.85 } }, pick('工具开关', 'Tool switches')),
+          h('div', { style: { fontSize: 10.5, color: dark ? MONITOR_COLORS.muted : undefined, opacity: dark ? 1 : 0.55 } },
             on + '/' + names.length + ' ' + pick('已注册 · 关掉即从注册表移除，原生同名工具接管', 'registered · off removes it from the registry')),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start' } },
@@ -2020,8 +2034,8 @@ window.__ModuleLoader__.load({
             style: { display: 'flex', minWidth: 210, flex: '1 1 210px', opacity: busy === name ? 0.6 : 1 },
           }, h(Toggle, {
             label: name,
-            hint: tools[name] ? pick('已注册', 'registered') : pick('已关闭', 'off'),
-            value: Boolean(tools[name]),
+            hint: hintFor(name),
+            value: Boolean(local[name]),
             onChange: (next) => { void flip(name, next) },
           }))),
         ),
@@ -2122,6 +2136,8 @@ window.__ModuleLoader__.load({
           ),
           error ? h('div', { style: { fontSize: 12, color: MONITOR_COLORS.red } }, 'metrics unavailable: ' + error) : null,
           !data ? h('div', { style: { fontSize: 12, color: MONITOR_COLORS.muted } }, pick('读取中…', 'loading…')) : null,
+          // 逐工具开关放最上面：用户两次都找不到它们，所以先给开关、再给曲线。
+          h(ToolsCard, { tools: data?.tools ?? null, wanted: data?.config?.tools ?? null, dark: true }),
           // Phase-4 rows, pinned above the older stats line. One row per class, never wraps; a
           // row that overflows fades its right edge and reports the hidden count as `+N`.
           // Charts live inside the block, immediately under the worker row.

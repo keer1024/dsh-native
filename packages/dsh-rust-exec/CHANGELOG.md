@@ -2,6 +2,31 @@
 
 All notable changes to `dsh-rust-exec` (the DSH Host plugin) and its `dsh-rust-worker` sidecar.
 
+## 1.7.8 — 2026-11-05
+
+1.7.7 shipped the per-tool switches, and the report came back the same day: "where in the UI am I
+supposed to see them?" They existed — in `settings.plugins.tab`, below two screens of other
+controls. Wrong place, not missing feature.
+
+### Fixed — the switches live in the window people actually open
+- `MonitorDialog` (opened from the resource strip under the composer) now renders `ToolsCard`
+  directly under the title, above the charts. The settings-tab copy stays for completeness.
+- `ToolsCard` keeps a local mirror of the switch state (`useState` + `useEffect` on the incoming
+  `tools`), so a flip shows up immediately instead of waiting for the dialog's next poll, and the
+  host's reply (`body.tools`) wins when present.
+- Three states are now labelled separately: `registered` (in the tool registry), `off` (the user
+  disabled it — `config.tools` says so), and `not loaded yet` (progressive disclosure: the dormant
+  tools are registered on first use, they were never disabled). 1.7.7 called all three "off",
+  which was simply wrong for this host's default config.
+
+### Tests
+- `tools/monitor_render_test.mjs`: fixture grows the 11-key `tools` map; the fetch stub now splits
+  GET/POST and records bodies, and `/config` answers `{ applied, tools }`. New block asserts the
+  card sits inside the dialog, that 11 rows render as `role="switch"`, that flipping `rust_write`
+  posts exactly `{ tools: { rust_write: false } }`, that the switch flips without waiting for a
+  poll, and that a dormant tool reads "not loaded" while a user-disabled one reads "off".
+- Full run: `monitor_render_test` 62 checks ALL PASS, `panel_render_test` ALL CHECKS PASSED.
+
 ## 1.7.7 — 2026-11-05
 
 Two reports from the 1.7.6 build: the monitor dialog opened at the bottom of the conversation and

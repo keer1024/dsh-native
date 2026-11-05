@@ -133,8 +133,21 @@ let SESSIONS = {
   ],
 }
 let metricsDown = false
-globalThis.fetch = dom.window.fetch = async (url) => {
+// 逐工具开关（1.7.7）：宿主回报的是注册表真值，弹窗里的卡片直接照它渲染。
+const TOOL_NAMES = ['rust_exec', 'rust_read', 'rust_search', 'rust_health', 'native_help',
+  'rust_write', 'rust_edit', 'rust_stat', 'rust_ls', 'rust_symbols', 'rust_session_open']
+METRICS.tools = Object.fromEntries(TOOL_NAMES.map((name) => [name, true]))
+const POSTS = []
+globalThis.fetch = dom.window.fetch = async (url, init) => {
   const u = String(url)
+  const method = init?.method ?? 'GET'
+  if (method !== 'GET') POSTS.push({ url: u, body: init?.body ? JSON.parse(init.body) : null })
+  if (u.includes('/config')) {
+    const sent = init?.body ? JSON.parse(init.body) : {}
+    const tools = { ...METRICS.tools, ...(sent.tools ?? {}) }
+    METRICS.tools = tools
+    return { ok: true, status: 200, json: async () => ({ applied: sent, tools }) }
+  }
   if (u.includes('/metrics')) {
     if (metricsDown) return { ok: false, status: 500, json: async () => ({}) }
     return { ok: true, status: 200, json: async () => METRICS }
@@ -357,6 +370,47 @@ check('monitor dialog height drops to 75vh',
   check('deleted session card disappears on the next poll',
     !live?.querySelector('[data-dsh-info^="session-"]'),
     String(live?.querySelectorAll('[data-dsh-info^="session-"]').length ?? -1) + ' card(s) left')
+}
+{
+  // 用户真实的入口是这条缩略条点开的窗口，所以开关必须在这里，不能只藏在设置页的插件分页里。
+  console.log('\n=== per-tool switches live in the monitor dialog ===')
+  const live = document.querySelector('[data-dsh-rust-monitor="dialog"]')
+  const card = live?.querySelector('[data-dsh-rust-tools="card"]')
+  check('tool switches sit inside the monitor dialog', Boolean(card), card ? 'present' : 'missing from dialog')
+  const rows = card ? [...card.querySelectorAll('[data-dsh-rust-tool]')] : []
+  check('every tool has a switch row', rows.length === 11, rows.length + ' row(s)')
+  check('switch rows are the registered tool names',
+    rows.some((row) => row.getAttribute('data-dsh-rust-tool') === 'rust_write'),
+    rows.map((row) => row.getAttribute('data-dsh-rust-tool')).slice(0, 3).join(','))
+  const row = card?.querySelector('[data-dsh-rust-tool="rust_write"]')
+  check('switch renders as a real role=switch', Boolean(row?.querySelector('[role="switch"]')))
+  check('switch starts on', row?.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'true',
+    row?.querySelector('[role="switch"]')?.getAttribute('aria-checked'))
+  const before = POSTS.length
+  await act(async () => {
+    row?.querySelector('[role="switch"]')?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  })
+  await settle(240)
+  const sent = POSTS.slice(before).find((entry) => entry.url.includes('/config'))
+  check('flipping a switch posts exactly that tool',
+    Boolean(sent) && sent.body?.tools?.rust_write === false && Object.keys(sent.body.tools).length === 1,
+    sent ? JSON.stringify(sent.body) : 'no POST')
+  check('switch reflects the host reply without waiting for a poll',
+    row?.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'false',
+    String(row?.querySelector('[role="switch"]')?.getAttribute('aria-checked')))
+  // 懒加载 ≠ 被关掉：progressive disclosure 打开时 rust_edit 没进注册表，但它并没有被禁用。
+  METRICS.tools = { ...METRICS.tools, rust_edit: false }
+  METRICS.config.tools = { ...(METRICS.config.tools ?? {}), rust_edit: true, rust_write: false }
+  await settle(1400)
+  const liveCard = document.querySelector('[data-dsh-rust-monitor="dialog"] [data-dsh-rust-tools="card"]')
+  const editRow = liveCard?.querySelector('[data-dsh-rust-tool="rust_edit"]')
+  check('an unregistered-but-not-disabled tool says so instead of "off"',
+    /未加载|not loaded/.test(editRow?.textContent || '') && !/(已关闭|off)$/.test((editRow?.textContent || '').trim()),
+    (editRow?.textContent || 'missing row').trim().slice(0, 60))
+  const writeRow = liveCard?.querySelector('[data-dsh-rust-tool="rust_write"]')
+  check('a tool the user switched off is labelled off, not "not loaded"',
+    /已关闭|off/.test(writeRow?.textContent || '') && !/未加载|not loaded/.test(writeRow?.textContent || ''),
+    (writeRow?.textContent || 'missing row').trim().slice(0, 60))
 }
 check('usage bars drawn for bounded metrics', Boolean(dialog?.querySelector('[data-dsh-rust-monitor-card] div[style*="border-radius: 2px"]')))
 check('no NaN/undefined leak in dialog', !/NaN|undefined/.test(dialog?.textContent || ''))
